@@ -29,7 +29,7 @@ import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, time, 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from S18Code.harnesses.loop import Config
 from S18Code.harnesses.loop_assignment import SYSTEM, run_loop
-from S18Code.tasks.materialise import materialise, run_tests
+from S18Code.tasks.materialise import grade_clean_room, materialise
 from S18Code.evals.axes import score
 
 # ---------------------------------------------------------------- the manifest
@@ -249,7 +249,9 @@ async def main():
                 print(f"  [{n}/{total}] {tid} ABORTED {type(e).__name__} "
                       f"(journalled)", flush=True)
                 continue
-            passed, tail = run_tests(ws, t)
+            # Clean room, not run_tests: the agent's workspace can hold a
+            # pytest.py that grades everything green. See grade_clean_room.
+            passed, tail = grade_clean_room(ws, t)
 
             # Journal FIRST. score() is pure and cannot contaminate this, but a
             # scorer that raises must not also destroy the evidence needed to

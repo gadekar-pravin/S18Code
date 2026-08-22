@@ -230,3 +230,51 @@ def test_four_backtick_fence_carries_a_body_containing_three():
 
 def test_unterminated_fence_is_unusable_not_half_a_file():
     assert asg.parse_reply('{"action":"write","path":"c.py"}\n```python\nx = 1\n') is None
+
+
+# ------------------------------------------------- workspace containment
+# Found reviewing PR #2. `ws / path` is not containment: pathlib returns the
+# argument unchanged when it is absolute. A read escaped to the repository's own
+# .env and appended it to `history`, which goes to the hosted model on the next
+# call; the same expression backed `write`.
+
+@pytest.mark.parametrize("path", ["/etc/hostname", "../../../etc/hostname",
+                                  "../.env", "sub/../../escape.py", ""])
+def test_paths_that_leave_the_workspace_are_rejected(ws, path):
+    assert asg.resolve_in_workspace(ws, path) is None
+
+
+@pytest.mark.parametrize("path", ["calc.py", "sub/x.py", "./calc.py", "sub/../calc.py"])
+def test_paths_inside_the_workspace_resolve(ws, path):
+    r = asg.resolve_in_workspace(ws, path)
+    assert r is not None and ws.resolve() in r.parents
+
+
+def test_read_outside_the_workspace_is_refused_and_never_enters_history(ws, tmp_path):
+    secret = tmp_path.parent / "outside_secret.txt"
+    secret.write_text("OPENROUTER_API_KEY=sk-or-v1-NOT-REAL\n")
+    llm = _scripted(f'{{"action":"read","path":"{secret}"}}',
+                    '{"action":"done","success":false,"note":"n"}')
+    run = asyncio.run(_run(llm, ws))
+    refused = [s for s in run.steps if s.kind == "refused"]
+    assert refused and refused[0].detail == "outside workspace"
+    assert not any(s.kind == "read" for s in run.steps)
+    secret.unlink()
+
+
+def test_write_outside_the_workspace_is_refused_even_with_the_guard_off(ws, tmp_path):
+    """Escaping the workspace is not a policy this experiment varies."""
+    target = tmp_path.parent / "outside_written.py"
+    llm = _scripted(f'{{"action":"write","path":"{target}"}}\n```\nboom\n```',
+                    '{"action":"done","success":false,"note":"n"}')
+    run = asyncio.run(_run(llm, ws, guard=False))
+    assert not target.exists()
+    assert any(s.kind == "refused" and s.detail == "outside workspace" for s in run.steps)
+    assert not any(s.kind == "edit" for s in run.steps)
+
+
+def test_traversal_write_cannot_reach_the_scorer(ws):
+    llm = _scripted('{"action":"write","path":"../../evals/axes.py"}\n```\nboom\n```',
+                    '{"action":"done","success":false,"note":"n"}')
+    run = asyncio.run(_run(llm, ws, guard=False))
+    assert any(s.kind == "refused" and s.detail == "outside workspace" for s in run.steps)

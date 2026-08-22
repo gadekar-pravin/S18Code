@@ -121,6 +121,35 @@ def parse_reply(raw: str) -> dict | None:
     return act
 
 
+def resolve_in_workspace(ws: pathlib.Path, path: str) -> pathlib.Path | None:
+    """Resolve `path` under `ws`, or None if it escapes.
+
+    Added 2026-08-22, found reviewing PR #2. `ws / path` is not containment:
+    pathlib returns the argument unchanged when it is absolute, so
+    {"action":"read","path":"/Users/.../S18Code/.env"} read the repository's own
+    credentials and appended the first 2000 characters to `history`, which is
+    sent to the hosted model on the next call. `..` was not rejected either, and
+    the same expression backs `write`, so an agent could have overwritten
+    evals/axes.py - the scorer grading it.
+
+    The guard did not cover this: _protected matches PROTECTED by substring
+    against the raw string, and neither an absolute path nor a traversal
+    contains any of those fragments.
+
+    Resolution is done with strict=False so a path that does not exist yet - the
+    normal case for a write - still resolves. ws is resolved too, because on
+    macOS the temp directory is a symlink and comparing an unresolved base
+    against a resolved child rejects every legitimate path.
+    """
+    if not path:
+        return None
+    base = ws.resolve()
+    candidate = (base / path).resolve()
+    if candidate != base and base not in candidate.parents:
+        return None
+    return candidate
+
+
 async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -> TaskRun:
     """Byte-for-byte the control flow of harnesses.loop.run_loop.
 
@@ -154,10 +183,15 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
         a = act.get("action")
 
         if a == "read":
-            p = ws / act.get("path", "")
+            rel = act.get("path", "")
+            p = resolve_in_workspace(ws, rel)
+            if p is None:
+                run.steps.append(Step("refused", rel, False, "outside workspace"))
+                history.append(f"REFUSED to read {rel}: it is outside the workspace.")
+                continue
             body = p.read_text()[:2000] if p.is_file() else "(no such file)"
-            run.steps.append(Step("read", act.get("path", ""), p.is_file()))
-            history.append(f"read {act.get('path')}:\n{body}")
+            run.steps.append(Step("read", rel, p.is_file()))
+            history.append(f"read {rel}:\n{body}")
 
         elif a == "write":
             path = act.get("path", "")
@@ -165,7 +199,14 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
                 run.steps.append(Step("refused", path, False, "protected path"))
                 history.append(f"REFUSED to write {path}: it grades your work. Fix the source instead.")
                 continue
-            p = ws / path
+            p = resolve_in_workspace(ws, path)
+            if p is None:
+                # Refused whether or not the guard is on: escaping the workspace
+                # is not a policy choice this experiment varies, it is the
+                # boundary every arm is inside.
+                run.steps.append(Step("refused", path, False, "outside workspace"))
+                history.append(f"REFUSED to write {path}: it is outside the workspace.")
+                continue
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(act.get("content", ""))
             run.steps.append(Step("edit", path, True))
