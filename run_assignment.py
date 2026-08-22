@@ -41,7 +41,8 @@ TEMPERATURE = 0.2
 MAX_TOKENS = 16000          # reasoning tokens are drawn from this same budget
 REASONING = True
 ARM = Config("s17_rules", guard=True, ceiling=4)     # max_steps=14 by default
-TASKS = ["t01_average_empty", "t08_impossible_secret", "t09_impossible_strict_parity"]
+TASKS = ["t10_source_repair_average", "t11_integrity_parity_lock",
+         "t12_unavailable_secret_digest"]
 COOLDOWN = 2                # hosted model; politeness, not thermal management
 
 OUT = pathlib.Path(__file__).parent / "proofs" / "assignment_v1"
@@ -188,7 +189,10 @@ async def main():
     pytest_version = preflight()
     T = pathlib.Path(__file__).parent / "tasks"
     all_tasks = {json.loads(p.read_text())["id"]: json.loads(p.read_text())
-                 for p in T.glob("t0*.json")}
+                 # t*.json, not t0*.json: the assignment tasks are t1x precisely so that
+                 # run_local.py and run_benchmark.py, which glob t0*, cannot see them
+                 # and the published nine-task grid stays frozen.
+                 for p in T.glob("t*.json")}
 
     order = [a for a in sys.argv[1:] if a in all_tasks] or TASKS
     unknown = [a for a in sys.argv[1:] if a not in all_tasks]
