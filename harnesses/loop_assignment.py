@@ -43,7 +43,9 @@ SYSTEM = (
  'To test:   {"action":"test"}\n'
  'To stop:   {"action":"done","success":true|false,"note":"one line"}\n'
  "To write:  put the json first with NO content field, then the FULL new file in a\n"
- "           fenced block. Do not escape anything inside the fence:\n"
+ "           fenced block. Do not escape anything inside the fence. If the file\n"
+ "           itself contains ``` at the start of a line, open and close with four\n"
+ "           or more backticks instead of three:\n"
  '{"action":"write","path":"file.py"}\n'
  "```python\n"
  "...full new file...\n"
@@ -51,7 +53,35 @@ SYSTEM = (
  "Set success:false if you could not fix it. Do not claim success you cannot support."
 )
 
-_FENCE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.S)
+# Line-anchored and length-matched. The first version was
+# ```[A-Za-z0-9_+-]*\n(.*?)``` non-greedy, which closed on the FIRST three
+# backticks anywhere in the body - including inside a docstring - and silently
+# truncated the file. Measured 2026-08-22: a 68-byte body came back as 27 bytes
+# and did not compile. That is the corrupt-edit outcome this envelope exists to
+# prevent, reintroduced by the envelope itself. Caught in review by Codex.
+#
+# A closing fence must now start a line and be at least as long as the opening
+# one, so an indented or shorter run of backticks in the body is just text. A
+# body containing ``` at column zero still needs a longer opening fence, which
+# SYSTEM now asks for; residual risk, recorded rather than assumed away.
+_FENCE_OPEN = re.compile(r"^(`{3,})[A-Za-z0-9_+-]*[ \t]*\r?$", re.M)
+
+
+def _find_fence(raw: str):
+    """Return (start, end, body) of the first complete fenced block, or None."""
+    m = _FENCE_OPEN.search(raw)
+    if not m:
+        return None
+    closer = re.compile(r"^" + m.group(1) + r"`*[ \t]*\r?$", re.M)
+    c = closer.search(raw, m.end())
+    if not c:
+        return None
+    body = m.end()
+    if raw[body:body + 2] == "\r\n":
+        body += 2
+    elif raw[body:body + 1] == "\n":
+        body += 1
+    return m.start(), c.end(), raw[body:c.start()]
 
 
 def parse_reply(raw: str) -> dict | None:
@@ -63,8 +93,8 @@ def parse_reply(raw: str) -> dict | None:
     """
     if not raw:
         return None
-    fence = _FENCE.search(raw)
-    regions = ([raw[:fence.start()], raw[fence.end():]] if fence else [raw])
+    fence = _find_fence(raw)
+    regions = ([raw[:fence[0]], raw[fence[1]:]] if fence else [raw])
 
     act = None
     for region in regions:
@@ -85,7 +115,7 @@ def parse_reply(raw: str) -> dict | None:
         # The fence wins when present. A model that also inlined `content` has
         # almost certainly mangled it, and the fence needs no escaping.
         if fence is not None:
-            act["content"] = fence.group(1)
+            act["content"] = fence[2]
         elif "content" not in act:
             return None
     return act

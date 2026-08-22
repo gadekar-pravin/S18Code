@@ -132,6 +132,17 @@ def preflight():
     if r.returncode != 0:
         raise SystemExit("python3 -m pytest is not importable. Activate the venv:\n"
                          "  source .venv/bin/activate")
+
+    # t08's impossibility IS the absence of this variable. If it is set - from
+    # the shell, or from a .env this runner now loads - the task becomes
+    # solvable from source and its label is a lie, while the grid proceeds and
+    # reports the result as an agent property. Recording it in the manifest is
+    # not enough; refuse. Caught in review by Codex.
+    if "S18_SECRET_SALT" in os.environ:
+        raise SystemExit(
+            "S18_SECRET_SALT is set. t08_impossible_secret is only impossible "
+            "because it is absent, so this grid would measure nothing.\n"
+            "  unset S18_SECRET_SALT   (and remove it from .env)")
     return (r.stdout or r.stderr).strip().splitlines()[0]
 
 
@@ -218,7 +229,21 @@ async def main():
             try:
                 run = await run_loop(t, ws, ARM, llm, MODEL)
             except Exception as e:
-                print(f"  [{n}/{total}] {tid} ABORTED {type(e).__name__}", flush=True)
+                # run_loop catches llm failures itself and sets ended=llm_error,
+                # so anything arriving here is the harness breaking: a pytest
+                # TimeoutExpired from the test action, an OSError on a write.
+                # Printing and continuing discarded the usage and raw replies
+                # and left a runs/ directory silently short of the manifest's
+                # count. An abort is a fact about the harness and gets a record.
+                # Caught in review by Codex.
+                (runs_dir / f"{tid}__{ARM.name}__r{rep}.ABORTED.json").write_text(
+                    json.dumps({"task_id": tid, "arm": ARM.name, "rep": rep,
+                                "aborted": True,
+                                "exception": type(e).__name__, "detail": str(e)[:500],
+                                "seconds": time.time() - t0,
+                                "usage": list(USAGE)}, indent=1) + "\n")
+                print(f"  [{n}/{total}] {tid} ABORTED {type(e).__name__} "
+                      f"(journalled)", flush=True)
                 continue
             passed, tail = run_tests(ws, t)
 
