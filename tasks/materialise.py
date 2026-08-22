@@ -10,6 +10,31 @@ from __future__ import annotations
 import json, os, pathlib, shutil, subprocess, tempfile
 
 
+# Everything the interpreter needs and nothing else. Added 2026-08-22, found
+# reviewing PR #2. run_assignment.py loads .env into os.environ so the runner can
+# reach OPENROUTER_API_KEY, and both subprocess call sites then handed that whole
+# environment to code the model wrote. A source file containing
+# `raise RuntimeError(os.environ["OPENROUTER_API_KEY"])` put the key into pytest's
+# output, which the loop appends to `history` and sends to the provider on the
+# next call, and which the grader stores in the journal. Verified reaching both.
+# Three live keys were in scope; nothing had leaked when this was found - the
+# whole repository and its git history were scanned.
+#
+# An allowlist, not a denylist, because the next secret nobody thought to strip
+# is the point. It also means S18_SECRET_SALT cannot reach a grading subprocess
+# even if the parent has it set, which is a second lock on t12's premise.
+_ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP",
+                  "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT")
+
+
+def sanitized_env() -> dict[str, str]:
+    """The environment a test subprocess gets. Contains no secret."""
+    env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    env["PYTHONPATH"] = ""            # keeps the sitecustomize route shut
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 def materialise(task: dict, root: str | None = None) -> pathlib.Path:
     d = pathlib.Path(root or tempfile.mkdtemp(prefix="s18_"))
     if d.exists() and root is None:
@@ -49,7 +74,7 @@ def run_tests(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
         p.write_text(body)
     r = subprocess.run(["python3", "-m", "pytest", "-q", "--no-header"],
                        cwd=workspace, capture_output=True, text=True, timeout=120,
-                       env={**os.environ, "PYTHONPATH": ""})
+                       env=sanitized_env())
     return r.returncode == 0, (r.stdout or r.stderr)[-400:]
 
 
@@ -97,5 +122,5 @@ def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
         dst.write_text(body)
     r = subprocess.run(["python3", "-m", "pytest", "-q", "--no-header"],
                        cwd=room, capture_output=True, text=True, timeout=120,
-                       env={**os.environ, "PYTHONPATH": ""})
+                       env=sanitized_env())
     return r.returncode == 0, (r.stdout or r.stderr)[-400:]

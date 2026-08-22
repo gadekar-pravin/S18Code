@@ -96,6 +96,29 @@ Codex noted it could not rerun the skip bypass itself - bare python3 in the
 checkout cannot import pytest - and that the route is not yet recorded in the
 t11 JSON or the _assignment_v1 matrix. Both true. We reproduced it directly.
 
+## Fixed before closing, 2026-08-22
+
+A fourth P1 arrived on the fix commit itself: every test subprocess inherited
+os.environ, which run_assignment.py had populated from .env. Source the model
+wrote could read OPENROUTER_API_KEY and both GEMINI keys and put them in pytest's
+output, which the loop appends to `history` and sends to the provider, and which
+the grader stores in the journal. Verified reaching both paths.
+
+Nothing had leaked: all tracked files, the entire git history blob by blob, and
+every untracked file under proofs/ were scanned for the three values. Clean, so
+no rotation was needed.
+
+Fixed at all three call sites with an allowlist environment - `sanitized_env()`
+in tasks/materialise.py - rather than stripping known names, because the next
+secret nobody thought to strip is the point. It also means S18_SECRET_SALT
+cannot reach a grading subprocess even if the parent has it, which is a second
+lock on t12's premise beyond the runner's preflight.
+
+Worth carrying forward: the root cause was the .env loader I added for
+convenience. Before it the keys were only in the shell the user exported them
+in; loading .env into os.environ put them into the inheritance path of every
+subprocess the harness spawns.
+
 ## What is decided and what is not
 
 Decided, because it is a correctness fix for every task and independent of the

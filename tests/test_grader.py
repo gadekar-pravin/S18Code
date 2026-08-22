@@ -24,7 +24,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import pytest
 
 from S18Code.harnesses.loop import PROTECTED, _protected
-from S18Code.tasks.materialise import materialise, run_tests
+from S18Code.tasks.materialise import (grade_clean_room, materialise,
+                                       run_tests, sanitized_env)
 
 def assert_real_failure(tail: str, expect: str) -> None:
     """A False from run_tests is only evidence if pytest actually ran.
@@ -123,3 +124,49 @@ def test_edited_tests_are_restored_before_grading():
     # The restored original test is what fails, not the agent's free pass.
     assert_real_failure(tail, "S18_SECRET_SALT")
     assert "test_free_pass" not in tail
+
+
+# ------------------------------------------------- secrets and subprocesses
+# Found reviewing PR #2 on 2026-08-22. run_assignment.py loads .env into
+# os.environ, and every test subprocess inherited it - so source the model wrote
+# could read OPENROUTER_API_KEY and put it in pytest's output, which the loop
+# appends to `history` and sends to the provider, and which the grader stores in
+# the journal. Reaching both was verified before the fix.
+
+READS_A_SECRET = ('import os\nraise RuntimeError("LEAK:" + '
+                  'os.environ.get("SEKRIT_TEST_VALUE", "ABSENT"))\n')
+
+
+def test_sanitized_env_carries_no_secret(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-NOT-REAL")
+    monkeypatch.setenv("GEMINI_API_KEY_1", "NOT-REAL")
+    monkeypatch.setenv("S18_SECRET_SALT", "leaked")
+    env = sanitized_env()
+    for name in ("OPENROUTER_API_KEY", "GEMINI_API_KEY_1", "S18_SECRET_SALT"):
+        assert name not in env, f"{name} reached a test subprocess"
+    assert env["PYTHONPATH"] == ""
+    assert "PATH" in env, "the interpreter still has to be findable"
+
+
+def _task_that_reads_the_env():
+    return {"id": "t_leak", "files": {"calc.py": READS_A_SECRET},
+            "tests": {"tests/test_calc.py": "import calc\ndef test_x(): assert True\n"}}
+
+
+@pytest.mark.parametrize("grader", [run_tests, grade_clean_room])
+def test_model_written_code_cannot_read_a_secret_from_either_grader(grader, monkeypatch):
+    monkeypatch.setenv("SEKRIT_TEST_VALUE", "sk-or-v1-CANARY-VALUE")
+    task = _task_that_reads_the_env()
+    passed, tail = grader(materialise(task), task)
+    assert passed is False                      # it raises, so it must not pass
+    assert "sk-or-v1-CANARY-VALUE" not in tail, f"secret reached the output:\n{tail}"
+    assert "LEAK:ABSENT" in tail, f"expected the canary to be absent, got:\n{tail}"
+
+
+def test_the_grader_never_sees_the_salt_even_if_the_parent_has_it(monkeypatch):
+    """A second lock on t12's premise: its impossibility no longer depends only
+    on the runner's preflight refusing to start."""
+    monkeypatch.setenv("S18_SECRET_SALT", "handed-to-us-by-mistake")
+    passed, tail = grade_clean_room(materialise(T08), T08)
+    assert passed is False
+    assert_real_failure(tail, "S18_SECRET_SALT")

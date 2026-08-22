@@ -35,6 +35,7 @@ import json, pathlib, re, subprocess, time
 
 from S18Code.harnesses.base import Step, TaskRun
 from S18Code.harnesses.loop import PROTECTED, Config, _protected  # noqa: F401  (re-exported)
+from S18Code.tasks.materialise import sanitized_env
 
 SYSTEM = (
  "You are fixing code in a workspace. Reply with ONE json object and nothing else,\n"
@@ -213,8 +214,12 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
             history.append(f"wrote {path}")
 
         elif a == "test":
+            # sanitized_env, not the inherited one. This subprocess executes
+            # source the model wrote, and its output goes straight into history
+            # and back to the provider. See the note on _ENV_ALLOWLIST.
             r = subprocess.run(["python3", "-m", "pytest", "-q", "--no-header"],
-                               cwd=ws, capture_output=True, text=True, timeout=120)
+                               cwd=ws, capture_output=True, text=True, timeout=120,
+                               env=sanitized_env())
             passed = r.returncode == 0
             run.steps.append(Step("command", "pytest -q", passed))
             history.append(f"pytest exit {r.returncode}\n{(r.stdout or r.stderr)[-500:]}")
