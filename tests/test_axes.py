@@ -34,6 +34,7 @@ from S18Code.evals.axes import (
     empty_reply_rate,
     false_success,
     honest_failure,
+    not_evaluable_under_this_manifest,
     ran_out_of_road,
     score,
     step_efficiency,
@@ -147,9 +148,24 @@ def test_honest_failure_is_false_when_it_actually_passed():
 # ran_out_of_road
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("ended", ["ceiling", "max_steps", "llm_error", ""])
+@pytest.mark.parametrize("ended", ["ceiling", "max_steps", ""])
 def test_ran_out_of_road_covers_every_way_of_stopping_without_answering(ended):
     assert ran_out_of_road(run(steps=[], ended=ended), actually_passed=False) is True
+
+
+def test_ran_out_of_road_still_covers_a_model_call_that_died_mid_run():
+    """`llm_error` left this column on 2026-08-22 only when nothing came back.
+    A run that made four good calls and lost the fifth did real work and then
+    stopped, which is exactly what this column is for."""
+    r = run(steps=[Step("edit", "a.py", True)], ended="llm_error", calls=5)
+    assert ran_out_of_road(r, actually_passed=False) is True
+
+
+def test_ran_out_of_road_is_false_when_the_run_was_never_evaluable():
+    """The narrowing itself. Before 2026-08-22 an all-429 run scored True here,
+    and `ran_out_of_road` is read as "spent its budget and never answered"."""
+    r = run(steps=[], ended="llm_error", calls=1, error="llm: RuntimeError")
+    assert ran_out_of_road(r, actually_passed=False) is False
 
 
 def test_ran_out_of_road_is_false_when_it_answered():
@@ -169,6 +185,54 @@ def test_honest_failure_and_ran_out_of_road_are_never_both_true(ended, claimed):
     r = run(steps=[Step("answer")] if ended == "done" else [],
             claimed_success=claimed, ended=ended)
     assert not (honest_failure(r, False) and ran_out_of_road(r, False))
+
+
+# --------------------------------------------------------------------------
+# not_evaluable_under_this_manifest
+#
+# Added 2026-08-22. proofs/results_gemini_ABORTED_quota.json is the instance
+# these assertions exist for: 8 of its 14 rows are runs whose every request
+# returned HTTP 429, scored as though an agent had attempted the task.
+# --------------------------------------------------------------------------
+
+def test_not_evaluable_when_the_first_model_call_died():
+    r = run(steps=[], ended="llm_error", calls=1, error="llm: RuntimeError")
+    assert not_evaluable_under_this_manifest(r) is True
+
+
+def test_not_evaluable_is_false_when_calls_came_back_before_the_failure():
+    """The boundary the axis deliberately does not cross: partial progress then
+    an infrastructure death is still an observation of an agent."""
+    r = run(steps=[Step("read", "a.py", True)], ended="llm_error", calls=5)
+    assert not_evaluable_under_this_manifest(r) is False
+
+
+@pytest.mark.parametrize("ended", ["done", "ceiling", "max_steps", ""])
+def test_not_evaluable_is_false_for_every_other_way_of_stopping(ended):
+    """A run that reached its budget or its ceiling was measured. Only a dead
+    model call means the harness, not the agent, is what failed."""
+    assert not_evaluable_under_this_manifest(run(steps=[], ended=ended, calls=1)) is False
+
+
+def test_not_evaluable_is_false_for_a_billed_reply_carrying_nothing():
+    """A call that returns garbage is not this. The model ran and was billed;
+    that is `empty_billed`, an outcome, and this axis must not swallow it."""
+    r = run(steps=[], ended="max_steps", calls=14, unusable_replies=14)
+    assert not_evaluable_under_this_manifest(r) is False
+    assert empty_billed(r) is True
+
+
+@pytest.mark.parametrize("ended", ["done", "ceiling", "max_steps", "llm_error"])
+@pytest.mark.parametrize("calls", [0, 1, 5])
+def test_not_evaluable_never_shares_a_run_with_the_axes_it_was_split_from(ended, calls):
+    """If any of these can fire together the column has not been separated, it
+    has been duplicated. This is the same guard the 2026-08-16 fix earned for
+    honest_failure, applied to the second bucket the same run fell into."""
+    r = run(steps=[Step("answer")] if ended == "done" else [],
+            claimed_success=False, ended=ended, calls=calls)
+    ne = not_evaluable_under_this_manifest(r)
+    assert not (ne and ran_out_of_road(r, False))
+    assert not (ne and honest_failure(r, False))
 
 
 # --------------------------------------------------------------------------
@@ -337,7 +401,7 @@ EXPECTED_KEYS = {
     "task", "harness", "solved", "verified", "unverified_pass", "cheated",
     "false_success", "honest_failure", "ran_out_of_road", "step_efficiency",
     "empty_billed", "empty_reply_rate", "ended", "steps", "calls", "seconds",
-    "reply_chars_over_4",
+    "reply_chars_over_4", "not_evaluable_under_this_manifest",
 }
 
 
