@@ -75,6 +75,22 @@ equal — the guard refuses exactly what the scorer counts as cheating. They div
 the guard permit a write the scorer then punished. `tests/test_axes.py` enforces the equality;
 edit both tuples or neither.
 
+`harnesses/loop_assignment.py` is a **separate** loop for the assignment grid and is not
+imported by `loop.py`. Same guard, ceiling, budget, `Step` and `TaskRun` records; the only
+difference is that a `write` carries the file body in a fenced block instead of a JSON
+string. It exists because `stealth/ox-alpha` cannot emit the `loop.py` envelope - ten of
+fourteen replies unparseable in the first smoke run, while every reply contained the
+correct repair. `response_format`, a stricter prompt, and a re-escaping repair were all
+measured and all failed; the repair produced code that did not compile 5/5, which would
+have turned a visible `unusable_reply` into a silent corrupt edit blamed on the agent.
+Full record in `proofs/assignment_v1/smoke_2026-08-22/ENVELOPE_FAILURE.md`. It imports
+`PROTECTED` from `loop.py` rather than copying it, so there is no third tuple to drift.
+
+`run_assignment.py` refuses to start when its runs directory already holds journals.
+Journals are named `{task}__{arm}__r{rep}.json`, so a re-run silently overwrote one on
+2026-08-22 and destroyed the raw record of the envelope failure. Move the directory aside
+rather than defeating the guard.
+
 `harnesses/base.py` defines the single `TaskRun`/`Step` record every scorer sees. Scorers must
 never learn which harness produced a run, and `TaskRun` deliberately has no "did it pass" field:
 truth is computed by the graders from the task's own tests, never from the agent's claim.

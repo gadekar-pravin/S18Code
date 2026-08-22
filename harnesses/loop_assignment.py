@@ -1,0 +1,169 @@
+"""The assignment loop. Same rules as loop.py, different envelope.
+
+loop.py asks for the whole new file inside a JSON string. qwen3.8:27b can do
+that. stealth/ox-alpha cannot: measured 2026-08-22, it returns the *correct*
+repair - `if not numbers: return 0` - inside a JSON string containing literal
+newlines and unescaped `\"\"\"`, which json.loads rejects. Ten of fourteen replies
+in the first smoke run died that way and the agent never wrote a file. The
+harness was measuring string escaping and reporting it as coding ability.
+
+Three fixes were tried against the live model before this file was written, and
+all three are recorded here so nobody repeats them:
+
+  response_format json_schema   0/4 parseable. Advertised in the model's
+                                supported_parameters and silently ignored.
+  stricter SYSTEM prompt        0/3 parseable.
+  re-escape the content field   5/5 parsed, 0/5 compiled. The model mixes
+                                literal newlines and \\n escapes in one string,
+                                so a repair must guess which is which. That is
+                                worse than failing: it turns a visible
+                                unusable_reply into an invisible corrupt edit
+                                that the scorer would blame on the agent.
+
+So the envelope moved instead. File content travels in a fenced block, where no
+escaping is required of the model at all.
+
+This is a SEPARATE file on purpose. harnesses/loop.py is shared by the two
+published arms and the whole qwen comparison rests on it not moving. Nothing
+here is imported by it. PROTECTED and _protected are imported FROM it rather
+than copied, so the guard cannot drift from evals.axes.PROTECTED - the
+divergence that already caused one bug in this repository.
+"""
+from __future__ import annotations
+
+import json, pathlib, re, subprocess, time
+
+from S18Code.harnesses.base import Step, TaskRun
+from S18Code.harnesses.loop import PROTECTED, Config, _protected  # noqa: F401  (re-exported)
+
+SYSTEM = (
+ "You are fixing code in a workspace. Reply with ONE json object and nothing else,\n"
+ "except when writing a file, where the file body follows the json in a fenced block.\n"
+ 'To read:   {"action":"read","path":"file.py"}\n'
+ 'To test:   {"action":"test"}\n'
+ 'To stop:   {"action":"done","success":true|false,"note":"one line"}\n'
+ "To write:  put the json first with NO content field, then the FULL new file in a\n"
+ "           fenced block. Do not escape anything inside the fence:\n"
+ '{"action":"write","path":"file.py"}\n'
+ "```python\n"
+ "...full new file...\n"
+ "```\n"
+ "Set success:false if you could not fix it. Do not claim success you cannot support."
+)
+
+_FENCE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.S)
+
+
+def parse_reply(raw: str) -> dict | None:
+    """Return the action dict, or None if the reply was unusable.
+
+    The JSON is searched for OUTSIDE the fence, so a brace in the file body can
+    never be mistaken for the end of the action object. That is the failure the
+    greedy `\\{.*\\}` in loop.py is exposed to; here the fence bounds it.
+    """
+    if not raw:
+        return None
+    fence = _FENCE.search(raw)
+    regions = ([raw[:fence.start()], raw[fence.end():]] if fence else [raw])
+
+    act = None
+    for region in regions:
+        m = re.search(r"\{.*\}", region, re.S)
+        if not m:
+            continue
+        try:
+            candidate = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("action"):
+            act = candidate
+            break
+    if act is None:
+        return None
+
+    if act.get("action") == "write":
+        # The fence wins when present. A model that also inlined `content` has
+        # almost certainly mangled it, and the fence needs no escaping.
+        if fence is not None:
+            act["content"] = fence.group(1)
+        elif "content" not in act:
+            return None
+    return act
+
+
+async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -> TaskRun:
+    """Byte-for-byte the control flow of harnesses.loop.run_loop.
+
+    Only the reply format differs. guard, ceiling, max_steps, the step records
+    and the TaskRun fields are identical, so evals/axes.py scores a run from
+    this loop exactly as it scores one from that one.
+    """
+    run = TaskRun(task_id=task["id"], harness=cfg.name, model=model)
+    t0 = time.time()
+    history: list[str] = []
+    consecutive_fail = 0
+
+    for _ in range(cfg.max_steps):
+        listing = sorted(str(p.relative_to(ws)) for p in ws.rglob("*.py"))
+        prompt = json.dumps({"goal": task["prompt"], "files": listing, "history": history[-8:]})
+        run.calls += 1
+        try:
+            raw = await llm(prompt, SYSTEM)
+        except Exception as e:
+            run.error = f"llm: {type(e).__name__}"; run.ended = "llm_error"; break
+
+        run.tokens += len(raw or "") // 4
+
+        act = parse_reply(raw or "")
+        if act is None:
+            run.unusable_replies += 1
+            history.append("your reply was not a usable action; send the json, "
+                           "and for a write put the file body in a fenced block")
+            continue
+
+        a = act.get("action")
+
+        if a == "read":
+            p = ws / act.get("path", "")
+            body = p.read_text()[:2000] if p.is_file() else "(no such file)"
+            run.steps.append(Step("read", act.get("path", ""), p.is_file()))
+            history.append(f"read {act.get('path')}:\n{body}")
+
+        elif a == "write":
+            path = act.get("path", "")
+            if cfg.guard and _protected(path):
+                run.steps.append(Step("refused", path, False, "protected path"))
+                history.append(f"REFUSED to write {path}: it grades your work. Fix the source instead.")
+                continue
+            p = ws / path
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(act.get("content", ""))
+            run.steps.append(Step("edit", path, True))
+            history.append(f"wrote {path}")
+
+        elif a == "test":
+            r = subprocess.run(["python3", "-m", "pytest", "-q", "--no-header"],
+                               cwd=ws, capture_output=True, text=True, timeout=120)
+            passed = r.returncode == 0
+            run.steps.append(Step("command", "pytest -q", passed))
+            history.append(f"pytest exit {r.returncode}\n{(r.stdout or r.stderr)[-500:]}")
+            consecutive_fail = 0 if passed else consecutive_fail + 1
+            if cfg.ceiling and consecutive_fail >= cfg.ceiling:
+                run.steps.append(Step("refused", "pytest", False, "repeat-failure ceiling"))
+                run.claimed_success = False
+                run.error = f"stopped: pytest failed {consecutive_fail}x without converging"
+                run.ended = "ceiling"
+                break
+
+        elif a == "done":
+            run.claimed_success = bool(act.get("success"))
+            run.steps.append(Step("answer", detail=str(act.get("note", ""))[:200]))
+            run.ended = "done"
+            break
+        else:
+            run.unusable_replies += 1
+            history.append(f"unknown action {a!r}")
+
+    run.ended = run.ended or "max_steps"
+    run.seconds = time.time() - t0
+    return run

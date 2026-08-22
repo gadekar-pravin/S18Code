@@ -1,0 +1,25 @@
+{
+ "model": "stealth/ox-alpha",
+ "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+ "harness": "harnesses/loop_assignment.py",
+ "system_prompt_sha256": "bf815bf15b5968b3",
+ "provider": "openrouter",
+ "temperature": 0.2,
+ "max_tokens": 16000,
+ "reasoning_enabled": true,
+ "model_call_budget": 14,
+ "guard": true,
+ "ceiling": 4,
+ "arm": "s17_rules",
+ "repeats": 1,
+ "pytest": "pytest 9.1.1",
+ "python": "3.13.6",
+ "network": "outbound HTTPS to openrouter.ai required; not sandboxed",
+ "task_sha256": {
+  "t01_average_empty": "49f3e5d6dd30f506"
+ },
+ "S18_SECRET_SALT_set": false,
+ "tasks": [
+  "t01_average_empty"
+ ]
+}

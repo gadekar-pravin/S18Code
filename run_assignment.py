@@ -27,7 +27,8 @@ count against max_tokens, hence 16000 rather than run_local.py's 1200.
 import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from S18Code.harnesses.loop import Config, run_loop
+from S18Code.harnesses.loop import Config
+from S18Code.harnesses.loop_assignment import SYSTEM, run_loop
 from S18Code.tasks.materialise import materialise, run_tests
 from S18Code.evals.axes import score
 
@@ -45,6 +46,24 @@ COOLDOWN = 2                # hosted model; politeness, not thermal management
 
 OUT = pathlib.Path(__file__).parent / "proofs" / "assignment_v1"
 
+def _load_dotenv() -> None:
+    """Read .env if present. Real environment always wins over the file.
+
+    No dependency: this repo has no manifest and is not going to grow one for
+    six lines. Values are never printed, and .env / .env.* are gitignored.
+    """
+    f = pathlib.Path(__file__).parent / ".env"
+    if not f.exists():
+        return
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
 KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 if not KEY:
     raise SystemExit(
@@ -80,9 +99,15 @@ async def llm(prompt, system):
             with urllib.request.urlopen(req, timeout=600) as r:
                 d = json.load(r)
             msg = (d.get("choices") or [{}])[0].get("message") or {}
+            content = msg.get("content") or ""
             USAGE.append({**(d.get("usage") or {}),
-                          "reasoning_chars": len(msg.get("reasoning") or "")})
-            return msg.get("content") or ""
+                          "reasoning_chars": len(msg.get("reasoning") or ""),
+                          # The raw reply, bounded. The plan asks the journal to
+                          # carry every response; TaskRun has no field for it and
+                          # widening TaskRun would break rescore.py on the
+                          # nineteen historical runs, so it rides here.
+                          "raw": content[:4000]})
+            return content
         except urllib.error.HTTPError as e:
             # Status only. The body can echo request material and the header
             # carries the key; neither belongs in a journal or a terminal.
@@ -115,6 +140,14 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
     return {
         "model": MODEL,
         "endpoint": ENDPOINT,
+        # NOT harnesses/loop.py. ox-alpha cannot emit that loop's JSON envelope:
+        # measured 0/4 parseable with response_format, 0/3 with a stricter
+        # prompt, and a re-escaping repair produced code that did not compile
+        # 5/5. loop_assignment.py moves the file body into a fenced block and
+        # changes nothing else. loop.py is untouched, so the published qwen
+        # comparison is unaffected.
+        "harness": "harnesses/loop_assignment.py",
+        "system_prompt_sha256": hashlib.sha256(SYSTEM.encode()).hexdigest()[:16],
         "provider": "openrouter",
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
@@ -157,6 +190,18 @@ async def main():
     manifest["tasks"] = order
 
     runs_dir = OUT / "runs"
+    # Refuse to clobber. Journals are named {task}__{arm}__r{rep}.json, so a
+    # second invocation with the same tasks overwrites the first silently. That
+    # already happened once on 2026-08-22: a smoke run recording ox-alpha's
+    # envelope failure was destroyed by the re-run that fixed it, and the raw
+    # record of the defect no longer exists. Evidence is immutable or it is not
+    # evidence.
+    existing = sorted(runs_dir.glob("*.json")) if runs_dir.exists() else []
+    if existing:
+        raise SystemExit(
+            f"{runs_dir} already holds {len(existing)} journal(s).\n"
+            f"Move them aside before running again - they cannot be regenerated:\n"
+            f"  mv {runs_dir} {runs_dir.parent / 'runs_<label>'}")
     runs_dir.mkdir(parents=True, exist_ok=True)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
     print(f"  manifest frozen -> {OUT / 'manifest.json'}")
