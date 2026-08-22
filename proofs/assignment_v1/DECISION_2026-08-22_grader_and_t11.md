@@ -119,6 +119,40 @@ convenience. Before it the keys were only in the shell the user exported them
 in; loading .env into os.environ put them into the inheritance path of every
 subprocess the harness spawns.
 
+## Two more P1s, found after the fix commit. NOT fixed - do these before the grid.
+
+Both reproduced 2026-08-22. Neither is a security issue and nothing is running,
+so they were recorded rather than rushed at the end of a session.
+
+**1. The agent's verification and the final grader see different files.**
+The loop accepts a write to any unprotected path inside the workspace, and the
+agent's own `test` action runs pytest with those files present. grade_clean_room
+then copies only the paths in `task["files"]`. So an ordinary multi-file repair -
+put the arithmetic in helper.py, import it from calc.py - shows the agent a
+green suite, it claims success honestly, and final grading fails with
+ModuleNotFoundError. Measured on t10: in-loop pytest True, grade_clean_room
+False. The run is then scored false_success, blaming the model for a
+harness/grader mismatch. This is the exact "infrastructure failure reported as
+an agent property" error the repository exists to catch, introduced by the
+clean-room fix that closed the pytest.py hole.
+
+The fix is NOT to copy every agent-created .py forward - that reopens
+pytest.py, conftest.py and the rest of the class. It is the positive write
+allowlist already in the plan: each task declares its writable files, the guard
+refuses writes outside that set, and the clean room copies exactly that set. The
+two then cannot disagree because they are the same list. Note this makes the
+allowlist a correctness requirement, not the hardening nicety it was filed as,
+and it must still move on both PROTECTED copies together.
+
+**2. A grader exception loses the journal and kills the grid.**
+grade_clean_room is called outside the try that wraps run_loop, and the journal
+is written after grading because it records actually_passed. A
+subprocess.TimeoutExpired from a hanging test at final collection therefore
+propagates out of main(): that run's replies and usage are gone and the
+remaining cells never run. This is the failure the journal-first ordering was
+added to prevent, reintroduced one line further down. Wrap the grading call and
+journal an aborted record the same way the run_loop handler does.
+
 ## What is decided and what is not
 
 Decided, because it is a correctness fix for every task and independent of the
