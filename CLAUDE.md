@@ -11,13 +11,14 @@ changing anything in `harnesses/`.
 
 ## The directory name is load-bearing
 
-`run_local.py`, `run_benchmark.py`, and `rescore.py` each do
+`run_local.py`, `run_benchmark.py`, `run_assignment.py`, and `rescore.py` each do
 `sys.path.insert(0, ...parents[1])` and then `import S18Code.*`. The checkout must stay named
-`S18Code`, and the two runners are invoked as modules from the **parent** directory:
+`S18Code`, and the runners are invoked as modules from the **parent** directory:
 
 ```bash
 cd .. && python3 -m S18Code.run_local                       # full grid, both arms
 cd .. && python3 -m S18Code.run_local t08_impossible_secret # one task, both arms
+cd .. && python3 -m S18Code.run_assignment                  # assignment grid, one arm
 python3 rescore.py                                          # from inside the repo
 ```
 
@@ -31,6 +32,11 @@ python3 rescore.py                                          # from inside the re
   model failure.
 - **`run_local.py` needs Ollama serving `qwen3.8:27b` on `localhost:11434`.** No API keys.
 - **`run_benchmark.py` needs `GEMINI_API_KEYS`** (comma-separated) or `GEMINI_API_KEY`.
+- **`run_assignment.py` needs `OPENROUTER_API_KEY`.** It targets `stealth/ox-alpha`, a
+  cloaked OpenRouter model priced at 0/0 whose identity and retention policy are
+  undisclosed and which can be withdrawn without notice. It runs a preflight that fails
+  before the first model call if `python3 -m pytest` is not importable, rather than
+  producing a grid of environmental `solved: false`.
 - There is no `pyproject.toml` and no lockfile. Do not run `uv run pytest` or `uv sync` here, and
   do not add a manifest without being asked.
 
@@ -49,6 +55,13 @@ never set on purpose — that absence is what makes `t08` impossible. Do not set
   are kept deliberately as records of a wrong metric and an aborted run. Never tidy them away.
 - `run_benchmark.py` writes `proofs/results.json`, a different file from the local variant's
   `proofs/results_local.json`.
+- **`run_assignment.py` writes to `proofs/assignment_v1/` and nowhere else.** Never point it
+  at `proofs/runs/`. `rescore.py` globs that directory and stamps the literal
+  `"model": "qwen3.8:27b"` into every row it derives, so a journal from any other model
+  dropped there is silently relabelled as qwen with no error raised. The assignment grid
+  keeps its own `manifest.json`, `runs/`, and `results.json` under `assignment_v1/`, and
+  its journals carry a real `usage` object from the provider rather than the
+  `reply_chars_over_4` proxy.
 
 ## Changing the loop
 
