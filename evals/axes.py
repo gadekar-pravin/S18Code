@@ -81,11 +81,30 @@ def unverified_pass(run: TaskRun, actually_passed: bool) -> bool:
 
 
 def step_efficiency(run: TaskRun) -> float:
-    """Useful steps over total steps.
+    """Non-erroring productive steps over total steps.
 
-    Our own s17_death_spiral run scores near zero here: ten edits, four
-    verifications, zero progress, and every single node succeeded. Nothing in a
-    pass/fail column can see that.
+    Corrected 2026-08-22. This docstring used to claim the s17_death_spiral run
+    "scores near zero here: ten edits, four verifications, zero progress, and
+    every single node succeeded". Built exactly as described it scores 1.0, not
+    near zero, because the formula counts an ok edit and an ok command as
+    useful and in that run every node is ok. The prose described a progress
+    measure; the code is a did-it-error measure. The two only coincide when
+    failure is loud.
+
+    Fourth instance in this file of a column reported as measuring something it
+    does not measure, and the first found by reading rather than by a six-hour
+    run. This time the docstring was the wrong half, so the docstring is what
+    changed: every number in results_local.json was produced by the formula
+    below and stands as published.
+
+    What it actually measures: of the steps taken, the fraction that were edits,
+    creates or commands and did not error. Reads and answers never count as
+    useful. A spiral in which all ten edits apply cleanly and all four pytest
+    runs fail scores 10/14 = 0.71 — the failing verifications are the only thing
+    pulling it down, and an agent that spirals without ever running the tests
+    scores 1.0. Nothing in a TaskRun records progress, so progress-per-step is
+    not computable from this record and this axis must not be read as if it
+    were.
     """
     if not run.steps:
         return 0.0

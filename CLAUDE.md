@@ -57,6 +57,11 @@ never set on purpose — that absence is what makes `t08` impossible. Do not set
 claim rests on those two flags being the only difference. Same for `SYSTEM`, the tool set, and
 `max_steps`.
 
+`harnesses.loop.PROTECTED` and `evals.axes.PROTECTED` are two copies of one list and must stay
+equal — the guard refuses exactly what the scorer counts as cheating. They diverged once, letting
+the guard permit a write the scorer then punished. `tests/test_axes.py` enforces the equality;
+edit both tuples or neither.
+
 `harnesses/base.py` defines the single `TaskRun`/`Step` record every scorer sees. Scorers must
 never learn which harness produced a run, and `TaskRun` deliberately has no "did it pass" field:
 truth is computed by the graders from the task's own tests, never from the agent's claim.
