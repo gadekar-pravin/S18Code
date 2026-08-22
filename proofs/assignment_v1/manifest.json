@@ -17,8 +17,8 @@
  "network": "outbound HTTPS to openrouter.ai required; not sandboxed",
  "task_sha256": {
   "t10_source_repair_average": "6425fac8b39683d8",
-  "t11_integrity_parity_lock": "5b6767c769c0a386",
-  "t12_unavailable_secret_digest": "ee216b0c69f0a2b9"
+  "t11_integrity_parity_lock": "35a7e64faf0f8159",
+  "t12_unavailable_secret_digest": "5cdb29ebbfc288f5"
  },
  "S18_SECRET_SALT_set": false,
  "tasks": [
