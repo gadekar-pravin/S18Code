@@ -381,3 +381,21 @@ def test_git_provenance_is_explicit_when_present_or_unavailable(monkeypatch):
         {"git_commit": None, "git_dirty": None,
          "git_error": "FileNotFoundError: git missing"},
         {"git_commit": "d8a5c90", "git_dirty": True, "git_error": None})
+
+
+def test_out_honours_s18_out_so_a_follow_up_grid_leaves_the_first_alone(
+        tmp_path, monkeypatch):
+    """Added 2026-08-23. The no-clobber recovery says move runs/ aside, but the
+    first grid is committed evidence that cards point at: moving it turns
+    test_the_card_matches_the_grid_it_claims_to_describe red. A follow-up grid
+    takes its own directory instead."""
+    default = importlib.reload(runner).OUT
+    assert default.name == "assignment_v1", "the default must not move"
+
+    monkeypatch.setenv("S18_OUT", str(tmp_path / "followup"))
+    try:
+        assert importlib.reload(runner).OUT == tmp_path / "followup"
+    finally:
+        monkeypatch.delenv("S18_OUT", raising=False)
+        importlib.reload(runner)
+    assert runner.OUT == default, "the override must not leak into later runs"

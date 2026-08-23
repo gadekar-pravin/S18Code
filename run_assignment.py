@@ -53,7 +53,19 @@ TASKS = ["t10_source_repair_average", "t11_integrity_parity_lock",
          "t12_unavailable_secret_digest"]
 COOLDOWN = 2                # hosted model; politeness, not thermal management
 
-OUT = pathlib.Path(__file__).parent / "proofs" / "assignment_v1"
+# S18_OUT added 2026-08-23. The no-clobber recovery says to move runs/ aside, but
+# that is the wrong move when the existing grid is committed evidence a card's
+# observed_* block points at - tests/test_assignment_tasks.py re-derives those
+# counts from proofs/assignment_v1/runs and fails if it is gone. A follow-up grid
+# gets its own directory instead, so the first grid stays exactly where its
+# manifest, report and card claims say it is.
+#
+# Results from two directories are NOT poolable by default. Each freezes its own
+# manifest, and after 2026-08-23 that manifest carries git_commit, so whether two
+# grids ran the same harness is a question the evidence can answer rather than one
+# a reader has to assume.
+OUT = pathlib.Path(os.getenv(
+    "S18_OUT", str(pathlib.Path(__file__).parent / "proofs" / "assignment_v1")))
 
 
 def _grading_timeout_report(error: subprocess.TimeoutExpired) -> dict:
