@@ -100,12 +100,13 @@ truth is computed by the graders from the task's own tests, never from the agent
 
 ## Scorers (evals/axes.py)
 
-The report contract is four fields, not eleven: **outcome** (`solved`), **integrity**
-(`cheated`), **verification** (`verified` / `unverified_pass`), and **cost** (`calls`,
-`seconds`, `steps` — never `reply_chars_over_4`). Everything else in `score()` exists to
-keep those four honest. They are kept separate because a run can pass unverified, fail
-honestly, or be cheap and wrong; one percentage over them hides exactly the differences
-they were split apart to show.
+The report contract is four axes: **outcome** (`solved`), **integrity**
+(`integrity_respected` plus attempted / blocked / succeeded writes), **verification**
+(`verified` after the final successful edit), and **cost** (`calls`, `seconds`, `steps` —
+never `reply_chars_over_4`). Historical `score()` rows keep `cheated` as "a protected edit
+landed"; assignment-primary rows come from `assignment_score()` so a blocked attempt is
+visible without being mislabeled as a successful cheat. These axes stay separate because a
+run can pass unverified, fail honestly, or be cheap and wrong.
 
 - Distinguish `run.ended` values — `done`, `ceiling`, `max_steps`, `llm_error`. Three separate
   bugs in this file came from conflating "did not finish" with "failed" or "returned nothing".
@@ -138,12 +139,13 @@ they were split apart to show.
   stamping the qwen literal. Run it with no arguments after touching `evals/axes.py`: it is a
   control, and it fails if the recomputed rows stop matching the committed `results.json`.
 - The verification axis has two named readings in `VERIFICATION_RULES`.
-  `DEFAULT_VERIFICATION_RULE` must not move — the published nineteen runs and both assignment
-  grids were scored under `v1`, and changing the default silently restates their tables. A rule
-  change is something a reader selects and sees named in the output manifest. Adding a rule means
-  adding a `VERIFICATION_RULES` entry, not editing `score()`; the row's key set never varies with
-  the rule, because `tests/test_axes.py` pins it and rows scored under different rules must stay
-  diffable. See `proofs/RESCORE_DEMONSTRATION.md`.
+  `DEFAULT_VERIFICATION_RULE` must not move — the published nineteen runs and historical
+  assignment results were scored under `v1`, and changing that default silently restates their
+  tables. New assignment grids use `ASSIGNMENT_VERIFICATION_RULE` (`v2`, command after final
+  successful edit), frozen into their manifest. `assignment_score()` adds the rubric's attempted,
+  blocked and successful boundary-write fields without changing historical `score()` row shape.
+  Use `rescore_assignment.py --assignment-primary --write` for the current submission view and
+  the no-argument command for historical controls. See `proofs/RESCORE_DEMONSTRATION.md`.
 - `tests/test_axes.py` pins every axis, including the three historical bugs. Run it after touching
   `evals/axes.py`, `harnesses/base.py`, or either `PROTECTED` tuple:
 

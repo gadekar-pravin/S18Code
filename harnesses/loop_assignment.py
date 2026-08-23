@@ -242,7 +242,8 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
                 # Refused whether or not the guard is on: escaping the workspace
                 # is not a policy choice this experiment varies, it is the
                 # boundary every arm is inside.
-                run.steps.append(Step("refused", path, False, "outside workspace"))
+                run.steps.append(Step("refused", path, False,
+                                      "write outside workspace"))
                 history.append(f"REFUSED to write {path}: it is outside the workspace.")
                 continue
             relative = p.relative_to(workspace_root).as_posix()

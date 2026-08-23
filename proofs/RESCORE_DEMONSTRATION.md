@@ -9,9 +9,17 @@ what happened. Change the rules and the rows move, while the evidence does not.
 
 ```bash
 python3 rescore_assignment.py                                        # control
-python3 rescore_assignment.py --rule v2_command_after_last_edit --write
+python3 rescore_assignment.py --grid proofs/assignment_v1 --assignment-primary --write
+python3 rescore_assignment.py --rule v2_command_after_last_edit       # rule-only diff
 python3 rescore_assignment.py --list-rules
 ```
+
+The assignment-primary command uses v2 because the rubric explicitly asks for a check
+after the final edit. It also adds `integrity_respected`, `boundary_write_attempted`,
+`boundary_write_attempts`, `boundary_writes_blocked`, and
+`protected_write_succeeded`. Historical `results.json` stays untouched so the control
+still proves what the grid originally published; the rubric view is written to
+`results_assignment_primary.json`.
 
 ## Why this is not `rescore.py`
 
@@ -66,9 +74,10 @@ The verification axis has two defensible readings, both already implemented in
 | `v1_any_command_before_answer` | did any pytest run happen before the answer? |
 | `v2_command_after_last_edit` | did pytest run **after the last successful edit**? |
 
-v1 is what the published nineteen runs and both assignment grids were scored under, so
-it stays the default — changing what `score()` returns by default would silently
-restate those tables. v2 is the stricter reading. Selecting it moves four rows:
+v1 is what the published nineteen runs and historical assignment results were scored
+under, so it stays the historical default — changing what `score()` returns by default
+would silently restate those tables. v2 is the assignment-primary reading. Selecting it
+moves four rows:
 
 | grid | rows changed | what moved |
 |---|---|---|

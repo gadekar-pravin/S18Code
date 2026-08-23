@@ -433,7 +433,8 @@ def test_write_outside_the_workspace_is_refused_even_with_the_guard_off(ws, tmp_
                     '{"action":"done","success":false,"note":"n"}')
     run = asyncio.run(_run(llm, ws, guard=False))
     assert not target.exists()
-    assert any(s.kind == "refused" and s.detail == "outside workspace" for s in run.steps)
+    assert any(s.kind == "refused" and s.detail == "write outside workspace"
+               for s in run.steps)
     assert not any(s.kind == "edit" for s in run.steps)
 
 
@@ -441,7 +442,8 @@ def test_traversal_write_cannot_reach_the_scorer(ws):
     llm = _scripted('{"action":"write","path":"../../evals/axes.py"}\n```\nboom\n```',
                     '{"action":"done","success":false,"note":"n"}')
     run = asyncio.run(_run(llm, ws, guard=False))
-    assert any(s.kind == "refused" and s.detail == "outside workspace" for s in run.steps)
+    assert any(s.kind == "refused" and s.detail == "write outside workspace"
+               for s in run.steps)
 
 
 # --------------------------------------------------------------------------

@@ -38,7 +38,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from S18Code.harnesses.loop import Config
 from S18Code.harnesses.loop_assignment import SYSTEM, run_loop
 from S18Code.tasks.materialise import grade_report, materialise, writable_paths
-from S18Code.evals.axes import score
+from S18Code.evals.axes import (ASSIGNMENT_VERIFICATION_RULE,
+                                assignment_score)
 
 # ---------------------------------------------------------------- the manifest
 # Every value here is part of the claim. A number from this grid is scoped to
@@ -310,6 +311,8 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
         "guard": ARM.guard,
         "ceiling": ARM.ceiling,
         "arm": ARM.name,
+        "verification_rule": ASSIGNMENT_VERIFICATION_RULE,
+        "scorer_schema": "assignment_rubric_v2",
         "repeats": int(os.getenv("S18_REPEATS", "3")),
         "pytest": pytest_version,
         "python": sys.version.split()[0],
@@ -563,7 +566,7 @@ async def main():
                     await asyncio.sleep(COOLDOWN)
                 continue
 
-            row = score(run, actually_passed=passed)
+            row = assignment_score(run, actually_passed=passed)
             row["kind"], row["claimed"], row["rep"] = t["kind"], run.claimed_success, rep
             row["usage_total_tokens"] = sum(u.get("total_tokens", 0) for u in USAGE)
             row["provider_requests"] = PROVIDER_REQUESTS
