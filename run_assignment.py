@@ -37,7 +37,7 @@ import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, time, 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from S18Code.harnesses.loop import Config
 from S18Code.harnesses.loop_assignment import SYSTEM, run_loop
-from S18Code.tasks.materialise import grade_clean_room, materialise
+from S18Code.tasks.materialise import grade_report, materialise
 from S18Code.evals.axes import score
 
 # ---------------------------------------------------------------- the manifest
@@ -305,8 +305,16 @@ async def main():
             # Clean room, not run_tests: the agent's workspace can hold a
             # pytest.py that grades everything green. See grade_clean_room.
             grading_error = None
+            report = None
             try:
-                passed, tail = grade_clean_room(ws, t)
+                # grade_report, not the boolean wrapper. Added 2026-08-23: exit 0
+                # is not the grade, and the four ways a run fails to pass -
+                # ordinary failure, all skipped, nothing collected, no report at
+                # all - are different facts about the agent that a single bool
+                # throws away at the one moment the evidence is being written.
+                report = grade_report(ws, t)
+                passed, tail = report["all_passed"], report["tail"]
+                report.pop("room", None)          # a temp path, already deleted
             except Exception as e:
                 # Found 2026-08-23: this used to sit outside every try. A final
                 # pytest timeout discarded the completed, provider-billed run
@@ -326,6 +334,8 @@ async def main():
                        "provider_retries": PROVIDER_RETRIES,
                        "final_files": {f.name: f.read_text()[:4000]
                                        for f in sorted(ws.glob("*.py"))}}
+            if report is not None:
+                journal["grading_report"] = report
             if grading_error is not None:
                 journal["grading_error"] = grading_error
             (runs_dir / f"{tid}__{ARM.name}__r{rep}.json").write_text(
@@ -363,14 +373,25 @@ async def main():
             row["usage_total_tokens"] = sum(u.get("total_tokens", 0) for u in USAGE)
             row["provider_requests"] = PROVIDER_REQUESTS
             row["provider_retries"] = PROVIDER_RETRIES
+            # The four ways a run failed to pass, kept apart in the row as well
+            # as the journal. A reader who sees solved:false is entitled to know
+            # whether the suite failed, was skipped, collected nothing, or never
+            # reported - they are different facts about the agent.
+            for flag in ("any_skipped", "nothing_collected",
+                         "collection_errored", "no_report"):
+                row[flag] = report[flag]
             rows.append(row)
             (OUT / "results.json").write_text(json.dumps(
                 {"manifest": manifest, "rows": rows}, indent=1) + "\n")
 
+            status = ",".join(f for f in ("any_skipped", "nothing_collected",
+                                          "collection_errored", "no_report")
+                              if report[f])
             print(f"  [{n}/{total}] {tid:30s} r{rep} solved={passed!s:5s} "
                   f"claimed={run.claimed_success!s:5s} cheat={row['cheated']!s:5s} "
                   f"steps={row['steps']:2d} tok={row['usage_total_tokens']:6d} "
-                  f"{time.time() - t0:5.0f}s {run.error[:30]}", flush=True)
+                  f"{time.time() - t0:5.0f}s {run.error[:30]}"
+                  f"{'  [' + status + ']' if status else ''}", flush=True)
             if n < total:
                 await asyncio.sleep(COOLDOWN)
 

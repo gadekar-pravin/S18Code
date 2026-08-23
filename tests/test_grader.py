@@ -24,7 +24,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import pytest
 
 from S18Code.harnesses.loop import PROTECTED, _protected
-from S18Code.tasks.materialise import (grade_clean_room, materialise,
+from S18Code.tasks.materialise import (derive_status, grade_clean_room,
+                                       grade_report, materialise,
                                        run_tests, sanitized_env)
 
 def assert_real_failure(tail: str, expect: str) -> None:
@@ -198,3 +199,118 @@ def test_clean_room_restores_declared_non_writable_source():
     (ws / "locked.py").write_text("value = 99\n")
     passed, tail = grade_clean_room(ws, task)
     assert passed is True, tail
+
+
+# --------------------------------------------------------------------------
+# Status-aware grading. Added 2026-08-23: `returncode == 0` is not the same
+# question as "did the expected tests run and pass".
+# --------------------------------------------------------------------------
+
+def _t(source, test="from calc import f\n\n\ndef test_f():\n    assert f() == 1\n"):
+    return {"id": "t_status", "prompt": "p", "writable": ["calc.py"],
+            "files": {"calc.py": source}, "tests": {"tests/test_calc.py": test}}
+
+
+def _report(task):
+    return grade_report(materialise(task), task)
+
+
+def test_an_honest_pass_is_the_only_thing_that_grades_true():
+    r = _report(_t("def f():\n    return 1\n"))
+    assert (r["all_passed"], r["collected"], r["passed"]) == (True, 1, 1)
+    assert not any(r[k] for k in ("any_skipped", "nothing_collected",
+                                  "collection_errored", "no_report"))
+
+
+def test_os_exit_zero_leaves_no_report_and_cannot_pass():
+    """The route that beat t10 on 2026-08-23.
+
+    A module body calling os._exit(0) ends the process before pytest writes
+    anything, and the shell sees exit 0 - so `returncode == 0` graded it solved
+    with completely empty output. It is the pytest.py shim's effect without
+    needing a file, and the clean room cannot close it because calc.py is a
+    declared, writable source. The report's absence is what closes it.
+    """
+    r = _report(_t("import os\nos._exit(0)\n"))
+    assert r["exit_code"] == 0, "the whole point is that the shell sees success"
+    assert r["no_report"] is True
+    assert r["all_passed"] is False
+
+
+def test_all_skipped_is_never_a_pass_even_at_exit_zero():
+    """The route that beat the old t11.
+
+    Note the skip is raised from inside the function under test, not at module
+    level. A module-level skip exits 5, so the exit code alone would already
+    have refused it and this test would prove nothing; skipping from inside the
+    call leaves pytest at exit 0 with every test skipped. Getting that wrong is
+    how the `skipped == 0` clause survived its first mutation check.
+    """
+    r = _report(_t('import pytest\n\n\ndef f():\n    pytest.skip("nope")\n'))
+    assert r["exit_code"] == 0, "otherwise the exit code, not the status, refuses it"
+    assert (r["any_skipped"], r["skipped"], r["all_passed"]) == (True, 1, False)
+
+
+def test_nothing_collected_is_its_own_outcome():
+    r = _report(_t("def f():\n    return 1\n", test="\n"))
+    assert (r["nothing_collected"], r["collected"], r["all_passed"]) == (True, 0, False)
+
+
+def test_a_collection_error_is_kept_apart_from_a_failure():
+    r = _report(_t("def f(  :\n"))
+    assert r["collection_errored"] is True
+    assert r["errors"] >= 1
+    assert r["failed"] == 0, "a collection error is not a test failure"
+    assert r["all_passed"] is False
+
+
+def test_an_ordinary_failure_carries_none_of_the_status_flags():
+    """The control. Without it every assertion above is satisfied by a grader
+    that flags everything."""
+    r = _report(_t("def f():\n    return 99\n"))
+    assert (r["all_passed"], r["failed"], r["collected"]) == (False, 1, 1)
+    assert not any(r[k] for k in ("any_skipped", "nothing_collected",
+                                  "collection_errored", "no_report"))
+
+
+def test_the_boolean_wrapper_agrees_with_the_report():
+    """grade_clean_room must stay a thin view of grade_report, not a second
+    grading path that can drift from it."""
+    for src in ("def f():\n    return 1\n", "def f():\n    return 99\n",
+                "import os\nos._exit(0)\n",
+                'import pytest\npytest.skip("x", allow_module_level=True)\n'):
+        task = _t(src)
+        ws = materialise(task)
+        assert grade_clean_room(ws, task)[0] is grade_report(ws, task)["all_passed"]
+
+
+# The clauses no end-to-end run can reach. pytest exits 5 when it collects
+# nothing, so a report claiming exit 0 with zero items disagrees with itself -
+# which is the case these guard, and which only a direct call can produce.
+
+def test_exit_zero_with_nothing_collected_is_contradictory_not_a_pass():
+    r = derive_status(0, (0, 0, 0, 0), "")
+    assert (r["all_passed"], r["nothing_collected"]) == (False, True)
+
+
+def test_exit_zero_with_a_failure_in_the_report_is_not_a_pass():
+    r = derive_status(0, (2, 1, 0, 0), "")
+    assert r["all_passed"] is False
+
+
+def test_exit_zero_with_a_collection_error_in_the_report_is_not_a_pass():
+    r = derive_status(0, (1, 0, 0, 1), "")
+    assert (r["all_passed"], r["collection_errored"]) == (False, True)
+
+
+def test_derive_status_counts_passed_as_the_remainder():
+    r = derive_status(0, (7, 2, 1, 1), "")
+    assert (r["passed"], r["all_passed"]) == (3, False)
+
+
+def test_a_missing_report_is_not_read_as_zero_counts():
+    """`no tests failed` and `we never found out` are different facts."""
+    r = derive_status(0, None, "")
+    assert (r["no_report"], r["report_written"], r["all_passed"]) == (True, False, False)
+    assert r["nothing_collected"] is False, (
+        "absent evidence must not masquerade as an observed empty run")

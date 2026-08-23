@@ -8,6 +8,7 @@ the verdict.
 from __future__ import annotations
 
 import json, os, pathlib, shutil, subprocess, tempfile
+from xml.etree import ElementTree
 
 
 # Everything the interpreter needs and nothing else. Added 2026-08-22, found
@@ -83,7 +84,7 @@ def run_tests(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
     return r.returncode == 0, (r.stdout or r.stderr)[-400:]
 
 
-def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
+def grade_report(workspace: pathlib.Path, task: dict) -> dict:
     """Grade in a fresh directory holding only canonical tests and allowed sources.
 
     Added 2026-08-22, found reviewing PR #2. run_tests restores the named test
@@ -149,7 +150,142 @@ def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
         dst = room / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(body)
-    r = subprocess.run(["python3", "-m", "pytest", "-q", "--no-header"],
-                       cwd=room, capture_output=True, text=True, timeout=120,
-                       env=sanitized_env())
-    return r.returncode == 0, (r.stdout or r.stderr)[-400:]
+    report = _run_and_report(room)
+    report["room"] = str(room)
+    return report
+
+
+def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
+    """The boolean verdict, for callers that only need pass/fail.
+
+    A thin wrapper over grade_report so there is one grading path, not two that
+    have to be kept in agreement.
+    """
+    r = grade_report(workspace, task)
+    return r["all_passed"], r["tail"]
+
+
+def _run_and_report(room: pathlib.Path) -> dict:
+    """Run pytest in `room` and keep the outcomes apart.
+
+    Added 2026-08-23. Until now the grade was `returncode == 0`, which is not
+    the same question as "did the expected tests run and pass". Three distinct
+    things reach exit 0, or reach the grade through it:
+
+        all skipped        `pytest.skip()` from the source under test. Measured
+                           on the old t11: "2 skipped", exit 0, graded PASS.
+        nothing collected  pytest uses exit 5 for this, so exit 0 with zero
+                           items is contradictory evidence, not success.
+        no report at all   a module body calling `os._exit(0)` ends the process
+                           before pytest writes anything, and the shell sees
+                           exit 0. Measured on t10 2026-08-23: graded PASS with
+                           completely empty output. This is the pytest.py shim's
+                           effect without needing a file, and the clean room
+                           cannot close it because the file is a declared,
+                           writable source.
+
+    The report is a JUnit XML written OUTSIDE the room - stdlib `--junitxml`, no
+    plugin and no new dependency, and nothing added to the graded directory for
+    the candidate to find or rewrite. Its existence is the completion sentinel:
+    pytest writes it at session end, so a missing or unparseable file means the
+    session did not finish, which is an infrastructure or tampering fact rather
+    than a result.
+
+    Returns the counts and four independent booleans. They are deliberately not
+    collapsed into one status, because partial collection and a collection error
+    can coexist, and because the whole report contract of this repository is
+    that fields which mean different things stay apart.
+    """
+    fd, xml_path = tempfile.mkstemp(prefix="s18_report_", suffix=".xml")
+    os.close(fd)
+    os.unlink(xml_path)               # pytest creates it; absence is the signal
+    try:
+        r = subprocess.run(
+            ["python3", "-m", "pytest", "-q", "--no-header",
+             f"--junitxml={xml_path}"],
+            cwd=room, capture_output=True, text=True, timeout=120,
+            env=sanitized_env())
+        counts = _parse_junit(xml_path)
+    finally:
+        try:
+            os.unlink(xml_path)
+        except OSError:
+            pass
+
+    return derive_status(r.returncode, counts, (r.stdout or r.stderr)[-400:])
+
+
+def derive_status(exit_code: int, counts: tuple[int, int, int, int] | None,
+                  tail: str) -> dict:
+    """The pure half, separated 2026-08-23 so every clause can be tested.
+
+    Two conditions in `all_passed` are unreachable end-to-end and were silently
+    untested until this split. Both survived a mutation check that should have
+    killed them:
+
+      collected > 0   pytest exits 5 when it collects nothing, so exit 0 with
+                      zero items cannot be produced by a working pytest. That is
+                      exactly why the clause is here - it is the guard against a
+                      report that disagrees with itself, which is tampering or a
+                      broken run, not a pass. Only a direct call can exercise it.
+      failed == 0     likewise dominated by the exit code in ordinary runs.
+
+    `skipped == 0` IS reachable and was mistested: a module-level
+    `pytest.skip()` exits 5, but `pytest.skip()` from inside the function under
+    test leaves exit 0 with every test skipped. That is the route that beat the
+    old t11.
+    """
+    if counts is None:
+        # No parseable report. Never a pass, whatever the exit code says.
+        return {"exit_code": exit_code, "report_written": False,
+                "collected": 0, "passed": 0, "failed": 0, "skipped": 0,
+                "errors": 0, "all_passed": False, "any_skipped": False,
+                "nothing_collected": False, "collection_errored": False,
+                "no_report": True,
+                "tail": tail or "(pytest wrote no report and no output)"}
+
+    collected, failed, skipped, errors = counts
+    return {
+        "exit_code": exit_code,
+        "report_written": True,
+        "collected": collected,
+        "passed": collected - failed - skipped - errors,
+        "failed": failed,
+        "skipped": skipped,
+        "errors": errors,
+        # Four separate questions. `all_passed` is the only one that grades.
+        "all_passed": (exit_code == 0 and collected > 0 and failed == 0
+                       and errors == 0 and skipped == 0),
+        "any_skipped": skipped > 0,
+        "nothing_collected": collected == 0 and errors == 0,
+        "collection_errored": errors > 0,
+        "no_report": False,
+        "tail": tail,
+    }
+
+
+def _parse_junit(xml_path: str) -> tuple[int, int, int, int] | None:
+    """(collected, failed, skipped, errors), or None if there is no report.
+
+    None is the completion sentinel failing and must never be read as zeroes:
+    "no tests failed" and "we never found out" are different facts.
+    """
+    try:
+        root = ElementTree.parse(xml_path).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    # pytest emits <testsuites><testsuite/></testsuites>; older ones emit a bare
+    # <testsuite>. Sum across suites so neither shape is a special case.
+    suites = root.iter("testsuite")
+    total = [0, 0, 0, 0]
+    seen = False
+    for s in suites:
+        seen = True
+        for i, attr in enumerate(("tests", "failures", "skipped", "errors")):
+            try:
+                total[i] += int(s.get(attr, 0))
+            except (TypeError, ValueError):
+                return None
+    if not seen:
+        return None
+    return total[0], total[1], total[2], total[3]

@@ -42,7 +42,11 @@ def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, 
     def fake_grade(ws, task):
         if task["id"] == "t10_source_repair_average":
             raise subprocess.TimeoutExpired(["python3", "-m", "pytest"], 120)
-        return False, "assertion failed"
+        return {"exit_code": 1, "report_written": True, "collected": 1,
+                "passed": 0, "failed": 1, "skipped": 0, "errors": 0,
+                "all_passed": False, "any_skipped": False,
+                "nothing_collected": False, "collection_errored": False,
+                "no_report": False, "tail": "assertion failed"}
 
     class _ReachedTheProvider(BaseException):
         """Deliberately not an Exception.
@@ -63,7 +67,7 @@ def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(runner, "llm", _explode)
     monkeypatch.setattr(runner, "run_loop", fake_run_loop)
-    monkeypatch.setattr(runner, "grade_clean_room", fake_grade)
+    monkeypatch.setattr(runner, "grade_report", fake_grade)
 
     asyncio.run(runner.main())
 
