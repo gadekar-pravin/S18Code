@@ -257,13 +257,23 @@ def grade_report(workspace: pathlib.Path, task: dict) -> dict:
         # The shared positive list is the boundary; canonical text wins everywhere
         # outside it because the loop could not legally have changed those files.
         for rel in dict.fromkeys((*canonical, *writable)):
-            dst = room / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
             if rel in writable:
                 src = writable[rel]
-                dst.write_text(src.read_text() if src.is_file() else "")
+                # Found 2026-08-23: an absent declared-writable path was copied
+                # as an empty file, fabricating candidate output and changing
+                # existence/import behaviour. The workspace is authoritative
+                # for writable files, so absence stays absent. All published
+                # assignment tasks declare writable == files and materialise()
+                # creates every one, so this fixes what the grader would do,
+                # not what any published grid did.
+                if not src.is_file():
+                    continue
+                body = src.read_text()
             else:
-                dst.write_text(canonical[rel])
+                body = canonical[rel]
+            dst = room / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(body)
         for rel, body in task["tests"].items():    # canonical, from the task file
             dst = room / rel
             dst.parent.mkdir(parents=True, exist_ok=True)

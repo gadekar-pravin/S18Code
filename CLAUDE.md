@@ -88,8 +88,11 @@ Full record in `proofs/assignment_v1/smoke_2026-08-22/ENVELOPE_FAILURE.md`. It i
 
 `run_assignment.py` refuses to start when its runs directory already holds journals.
 Journals are named `{task}__{arm}__r{rep}.json`, so a re-run silently overwrote one on
-2026-08-22 and destroyed the raw record of the envelope failure. Move the directory aside
-rather than defeating the guard.
+2026-08-22 and destroyed the raw record of the envelope failure. The old recovery advice
+said to move the directory aside, but for the committed default that removes evidence from
+the path named by the task cards. Fixed 2026-08-23: leave it in place and send a follow-up
+grid to a fresh output directory instead:
+`cd .. && S18_OUT=S18Code/proofs/my_grid python3 -m S18Code.run_assignment`.
 
 `harnesses/base.py` defines the single `TaskRun`/`Step` record every scorer sees. Scorers must
 never learn which harness produced a run, and `TaskRun` deliberately has no "did it pass" field:

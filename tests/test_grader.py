@@ -180,7 +180,27 @@ def test_the_grader_never_sees_the_salt_even_if_the_parent_has_it(monkeypatch):
 
 # ------------------------------------------------ shared writable contract
 
+def test_clean_room_leaves_an_absent_declared_writable_file_absent():
+    """Found 2026-08-23: the clean room fabricated an empty helper.py.
+
+    All published assignment tasks declare writable == files and materialise()
+    creates each file, so this pins what the grader would do in the previously
+    unreachable case rather than changing a published observation.
+    """
+    task = {
+        "id": "t_absent_helper",
+        "files": {"calc.py": "value = 7\n"},
+        "writable": ["calc.py", "helper.py"],
+        "tests": {"tests/test_calc.py":
+                  "import os\n\n\ndef test_absent():\n"
+                  "    assert not os.path.exists('helper.py')\n"},
+    }
+    passed, tail = grade_clean_room(materialise(task), task)
+    assert passed is True, tail
+
+
 def test_clean_room_copies_a_declared_writable_helper():
+    """The present half of the pair: writable files must still be copied."""
     task = {
         "id": "t_helper",
         "files": {"calc.py": "from helper import value\n"},

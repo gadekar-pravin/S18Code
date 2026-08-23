@@ -211,6 +211,38 @@ def test_an_unknown_rule_is_refused_rather_than_silently_defaulted():
 # shapes this rescore must reproduce but no committed journal exercises
 # --------------------------------------------------------------------------
 
+def test_a_grid_of_only_abort_journals_keeps_every_cell_as_a_non_result(tmp_path):
+    """Found 2026-08-23: abort journals raised KeyError(actually_passed).
+
+    The second journal models the pre-fix shape. Its absent kind stays visibly
+    None rather than being guessed from a task file that may no longer match the
+    frozen manifest. Because both journals produce rows, this grid is non-empty
+    and cannot trip the NO JOURNALS guard.
+    """
+    grid = tmp_path / "only_aborts"
+    (grid / "runs").mkdir(parents=True)
+    (grid / "manifest.json").write_text(json.dumps({"model": "m"}))
+    common = {"arm": "s17_rules", "rep": 0, "aborted": True,
+              "exception": "OSError", "detail": "write broke", "seconds": 1.5,
+              "usage": [{"total_tokens": 7}], "provider_requests": 2,
+              "provider_retries": 1, "final_files": {"calc.py": "partial"}}
+    (grid / "runs" / "a.ABORTED.json").write_text(json.dumps(
+        {**common, "task_id": "t_new", "kind": "source_repair"}))
+    (grid / "runs" / "b.ABORTED.json").write_text(json.dumps(
+        {**common, "task_id": "t_legacy", "rep": 1}))
+
+    rows = ra.rescore_grid(grid, DEFAULT_VERIFICATION_RULE)["rows"]
+    base = {"harness": "s17_rules", "not_a_result": True,
+            "result_status": "harness_aborted", "solved": None,
+            "claimed": None, "ended": None, "steps": 0, "calls": 0,
+            "provider_requests": 2, "provider_retries": 1,
+            "harness_exception": "OSError", "harness_detail": "write broke",
+            "usage_total_tokens": 7}
+    assert rows == [
+        {"task": "t_new", "kind": "source_repair", "rep": 0, **base},
+        {"task": "t_legacy", "kind": None, "rep": 1, **base}]
+
+
 def test_a_grader_error_journal_stays_a_non_result_instead_of_being_scored():
     """run_assignment.py emits a deliberately different row for an
     infrastructure failure - solved:null, no axes - so a complete N-cell
@@ -245,3 +277,42 @@ def test_rescoring_reads_journals_and_never_reaches_a_provider():
     for forbidden in ("urllib", "requests", "http", "socket", "openrouter",
                       "run_assignment", "subprocess"):
         assert forbidden not in imports, f"rescore imports {forbidden}"
+
+
+# --------------------------------------------------------------------------
+# grid discovery, and the vacuity it introduced
+# --------------------------------------------------------------------------
+
+def test_discovery_finds_every_grid_and_excludes_the_local_runs():
+    """A hardcoded list stops covering the next grid silently. The predicate is
+    manifest.json + runs/, which proofs/runs and proofs/t06_specgame lack."""
+    found = ra.grids()
+    proofs = REPO / "proofs"
+    expected = {p for p in proofs.iterdir()
+                if p.is_dir() and (p / "runs").is_dir()
+                and (p / "manifest.json").is_file()}
+    assert set(found) == expected
+    assert proofs / "runs" not in found, "the local grid is rescore.py's job"
+    assert proofs / "t06_specgame" not in found
+    # both committed assignment grids are covered, whatever else is on disk
+    assert {p.name for p in found} >= {"assignment_v1", "assignment_v1_t12x6"}
+
+
+def test_a_grid_with_no_journals_fails_the_control_instead_of_passing_it(
+        tmp_path, capsys):
+    """Found 2026-08-23, the same hour discovery landed: an empty runs/ compares
+    equal to an empty results.json, and the control printed a pass. An agreement
+    over nothing is the "all attacks closed" reading of a broken harness."""
+    grid = tmp_path / "assignment_empty"
+    (grid / "runs").mkdir(parents=True)
+    (grid / "manifest.json").write_text(json.dumps({"model": "none"}))
+    (grid / "results.json").write_text(json.dumps({"manifest": {}, "rows": []}))
+
+    assert ra.main(["--grid", str(grid)]) == 1
+    assert "NO JOURNALS" in capsys.readouterr().out
+
+
+def test_a_populated_grid_still_passes_the_control(capsys):
+    """The other half of the pair: the guard must not fail everything."""
+    assert ra.main(["--grid", str(GRIDS[1])]) == 0
+    assert "control: recomputed rows match" in capsys.readouterr().out

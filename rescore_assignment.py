@@ -20,7 +20,7 @@ Two things it does:
      The journals are read-only inputs; nothing here re-runs a model, and the
      provider module is never imported.
 
-    python3 rescore_assignment.py                          # control, both grids
+    python3 rescore_assignment.py                          # control, every grid
     python3 rescore_assignment.py --rule v2_command_after_last_edit --write
     python3 rescore_assignment.py --grid proofs/assignment_v1 --list-rules
 
@@ -41,8 +41,24 @@ from S18Code.evals.axes import (DEFAULT_VERIFICATION_RULE, VERIFICATION_RULES,
 from S18Code.harnesses.base import Step, TaskRun
 
 HERE = pathlib.Path(__file__).parent
-GRIDS = (HERE / "proofs" / "assignment_v1",
-         HERE / "proofs" / "assignment_v1_t12x6")
+
+
+def grids() -> tuple[pathlib.Path, ...]:
+    """Every assignment grid on disk, discovered rather than listed.
+
+    A hardcoded list goes stale the first time a grid is added, and the control
+    then silently stops covering it - the same drift that left the README
+    claiming nine tasks when there were twelve. Silently narrowing coverage is
+    worse here than elsewhere, because a control that checks fewer things still
+    prints as passing.
+
+    A grid is a directory under proofs/ carrying both its own manifest.json and
+    a runs/ of journals. That excludes proofs/runs (the local grid, which
+    rescore.py scores) and proofs/t06_specgame.
+    """
+    return tuple(sorted(p for p in (HERE / "proofs").iterdir()
+                        if p.is_dir() and (p / "runs").is_dir()
+                        and (p / "manifest.json").is_file()))
 
 # The five ways a graded run failed to pass, carried from the grading report
 # into the row. Kept apart rather than collapsed into solved:false - a reader is
@@ -70,6 +86,27 @@ def row_from_journal(d: dict, rule: str) -> tuple[dict, list[str]]:
     silently averages its own outage.
     """
     d = dict(d)
+    if d.get("aborted") is True:
+        # Found 2026-08-23: run_assignment.py writes this smaller journal when
+        # the harness raises, but rescoring treated it as a TaskRun and died on
+        # actually_passed. Preserve the manifest cell as the same non-result
+        # row the runner emits; scoring or skipping it would both misstate the
+        # grid. Future journals carry kind. Older ones did not, so None remains
+        # visible rather than being guessed from a task file that may have moved.
+        usage = d.get("usage") or []
+        return {"task": d["task_id"],
+                "harness": d.get("harness", d.get("arm")),
+                "kind": d.get("kind"), "rep": d["rep"],
+                "not_a_result": True, "result_status": "harness_aborted",
+                "solved": None, "claimed": None, "ended": None,
+                "steps": 0, "calls": 0,
+                "provider_requests": d.get("provider_requests"),
+                "provider_retries": d.get("provider_retries"),
+                "harness_exception": d.get("exception"),
+                "harness_detail": d.get("detail"),
+                "usage_total_tokens": sum(
+                    u.get("total_tokens", 0) for u in usage)}, []
+
     report = d.get("grading_report")
     grading_error = d.get("grading_error")
     passed, kind, rep = d["actually_passed"], d["kind"], d["rep"]
@@ -164,11 +201,11 @@ def main(argv=None) -> int:
             print(f"{name}{mark}\n    {fn.__doc__.splitlines()[0]}")
         return 0
 
-    grids = a.grid or list(GRIDS)
+    targets = a.grid or list(grids())
     is_control = a.rule == DEFAULT_VERIFICATION_RULE
     failures = 0
 
-    for grid in grids:
+    for grid in targets:
         if not (grid / "runs").is_dir():
             print(f"{grid}: no runs/ directory", file=sys.stderr)
             return 2
@@ -182,6 +219,18 @@ def main(argv=None) -> int:
         if back:
             print(f"  absent in these journals, filled False: {back} "
                   f"(this grid predates the flag)")
+
+        # A grid with no journals compares equal to a results.json with no rows
+        # and printed "control: recomputed rows match". Found 2026-08-23, the
+        # same hour discovery replaced the hardcoded list - the empty directory
+        # of a grid still being written was silently counted as a pass. An
+        # agreement over nothing is the "all attacks closed" reading of a broken
+        # harness, so say so instead and fail.
+        if not derived["rows"]:
+            failures += 1
+            print("  NO JOURNALS: nothing to control. An empty grid agrees with "
+                  "an empty results.json and that is not a check.")
+            continue
 
         if is_control:
             # The control has to be able to fail, or it is decoration. Only the

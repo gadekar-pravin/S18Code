@@ -61,11 +61,11 @@ TASKS = ["t10_source_repair_average", "t11_integrity_parity_lock",
          "t12_unavailable_secret_digest"]
 COOLDOWN = 2                # hosted model; politeness, not thermal management
 
-# S18_OUT added 2026-08-23. The no-clobber recovery says to move runs/ aside, but
-# that is the wrong move when the existing grid is committed evidence a card's
-# observed_* block points at - tests/test_assignment_tasks.py re-derives those
-# counts from proofs/assignment_v1/runs and fails if it is gone. A follow-up grid
-# gets its own directory instead, so the first grid stays exactly where its
+# S18_OUT added 2026-08-23. The no-clobber recovery used to say to move runs/
+# aside, but that is the wrong move when the existing grid is committed evidence
+# a card's observed_* block points at - tests/test_assignment_tasks.py re-derives
+# those counts from proofs/assignment_v1/runs and fails if it is gone. A follow-up
+# grid gets its own directory instead, so the first grid stays exactly where its
 # manifest, report and card claims say it is.
 #
 # Results from two directories are NOT poolable by default. Each freezes its own
@@ -397,13 +397,16 @@ async def main():
     # evidence.
     existing = sorted(runs_dir.glob("*.json")) if runs_dir.exists() else []
     if existing:
+        fresh_out = OUT.parent / f"{OUT.name}_followup"
         raise SystemExit(
             f"{runs_dir} already holds {len(existing)} journal(s).\n"
-            f"Move them aside before running again - they cannot be regenerated:\n"
-            f"  mv {runs_dir} {runs_dir.parent / 'runs_<label>'}")
+            "Leave them in place; they cannot be regenerated. Choose a fresh "
+            "output directory:\n"
+            f"  cd .. && S18_OUT={fresh_out} "
+            "python3 -m S18Code.run_assignment")
     runs_dir.mkdir(parents=True, exist_ok=True)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
-    # Found 2026-08-23: moving runs/ aside, as the no-clobber recovery says,
+    # Found 2026-08-23: moving runs/ aside, as the no-clobber recovery then said,
     # left the previous grid's derived results.json beside this new manifest.
     # Results are regenerable from immutable journals, so replace only this
     # derived file with an empty current-manifest table before any cell starts.
@@ -437,7 +440,7 @@ async def main():
                 _atomic_write_journal(
                     runs_dir / f"{tid}__{ARM.name}__r{rep}.ABORTED.json",
                     {"task_id": tid, "arm": ARM.name, "rep": rep,
-                     "aborted": True,
+                     "aborted": True, "kind": t["kind"],
                      "exception": type(e).__name__, "detail": str(e)[:500],
                      "seconds": time.time() - t0,
                      "usage": list(USAGE),

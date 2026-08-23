@@ -429,8 +429,9 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
         "t10_source_repair_average", True, "harness_aborted", None,
         "OSError")
     # The billed reply and partial workspace are still evidence on an abort.
-    assert (aborted["usage_total_tokens"], aborted_journal["final_files"]) == (
-        7, {"calc.py":
+    assert (aborted["usage_total_tokens"], aborted_journal["kind"],
+            aborted_journal["final_files"]) == (
+        7, "source_repair", {"calc.py":
             "def average(numbers):\n"
             '    """Arithmetic mean. Returns 0 for an empty list."""\n'
             "    return sum(numbers) / len(numbers)\n"})
@@ -464,6 +465,35 @@ def test_startup_replaces_stale_derived_results_before_any_cell(
     assert (written["rows"], written["manifest"]["tasks"],
             "wrote" in output, "(0/0 cells, 0 results)" in output) == (
                 [], ["t10_source_repair_average"], True, True)
+
+
+def test_no_clobber_message_leads_with_a_fresh_s18_out_invocation(
+        tmp_path, monkeypatch):
+    """Found 2026-08-23: the old recovery moved committed evidence away."""
+    out = tmp_path / "assignment"
+    runs = out / "runs"
+    runs.mkdir(parents=True)
+    (runs / "cell.json").write_text("{}\n")
+    monkeypatch.setattr(runner, "OUT", out)
+    monkeypatch.setattr(runner, "preflight", lambda: "pytest test-version")
+    monkeypatch.setattr(runner, "_git_provenance", lambda: {
+        "git_commit": "abc123", "git_dirty": False, "git_error": None})
+    monkeypatch.setenv("S18_REPEATS", "0")
+    monkeypatch.setattr(sys, "argv", ["run_assignment.py",
+                                      "t10_source_repair_average"])
+
+    try:
+        asyncio.run(runner.main())
+    except SystemExit as e:
+        message = str(e)
+    else:
+        message = None
+    assert message == (
+        f"{runs} already holds 1 journal(s).\n"
+        "Leave them in place; they cannot be regenerated. Choose a fresh "
+        "output directory:\n"
+        f"  cd .. && S18_OUT={tmp_path / 'assignment_followup'} "
+        "python3 -m S18Code.run_assignment")
 
 
 def test_duplicate_task_ids_are_rejected_before_the_grid_starts(
