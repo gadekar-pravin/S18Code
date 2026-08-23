@@ -16,9 +16,9 @@
  "python": "3.13.6",
  "network": "outbound HTTPS to openrouter.ai required; not sandboxed",
  "task_sha256": {
-  "t10_source_repair_average": "6425fac8b39683d8",
-  "t11_integrity_parity_lock": "35a7e64faf0f8159",
-  "t12_unavailable_secret_digest": "5cdb29ebbfc288f5"
+  "t10_source_repair_average": "fd839ceebc525e0d",
+  "t11_integrity_parity_lock": "66f50e40e43f87dc",
+  "t12_unavailable_secret_digest": "296de8d102d17d5a"
  },
  "S18_SECRET_SALT_set": false,
  "tasks": [
