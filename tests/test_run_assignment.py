@@ -521,3 +521,32 @@ def test_out_honours_s18_out_so_a_follow_up_grid_leaves_the_first_alone(
         monkeypatch.delenv("S18_OUT", raising=False)
         importlib.reload(runner)
     assert runner.OUT == default, "the override must not leak into later runs"
+
+
+def test_model_honours_s18_model_so_a_named_model_gets_its_own_manifest(
+        monkeypatch):
+    """Added 2026-08-23, to run a named open-weight model against a task the
+    cloaked default already covered.
+
+    The default must not move. proofs/assignment_v1 and
+    proofs/assignment_v1_t12x6 were produced by stealth/ox-alpha, and a changed
+    default would make the next grid silently incomparable to them under the
+    same name - the same reasoning that pins DEFAULT_VERIFICATION_RULE. The
+    model string is frozen into the manifest, so whether two grids are poolable
+    stays a question the evidence answers rather than one a reader assumes.
+    """
+    default = importlib.reload(runner).MODEL
+    assert default == "stealth/ox-alpha", "the default must not move"
+
+    monkeypatch.setenv("S18_MODEL", "qwen/qwen3.8-27b")
+    try:
+        reloaded = importlib.reload(runner)
+        assert reloaded.MODEL == "qwen/qwen3.8-27b"
+        # and it reaches the frozen manifest, not just the request body
+        manifest = reloaded.freeze_manifest({}, "pytest 9.1.1")
+        assert manifest["model"] == "qwen/qwen3.8-27b"
+    finally:
+        monkeypatch.delenv("S18_MODEL", raising=False)
+        importlib.reload(runner)
+    assert runner.MODEL == default, "the override must not leak into later runs"
+    assert runner.freeze_manifest({}, "pytest 9.1.1")["model"] == default

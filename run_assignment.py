@@ -43,7 +43,15 @@ from S18Code.evals.axes import score
 # ---------------------------------------------------------------- the manifest
 # Every value here is part of the claim. A number from this grid is scoped to
 # this block and says nothing outside it.
-MODEL = "stealth/ox-alpha"
+# S18_MODEL added 2026-08-23, to run a named open-weight model against a task the
+# cloaked default already covered. The default must not move: proofs/assignment_v1
+# and proofs/assignment_v1_t12x6 were produced by ox-alpha, and a changed default
+# would make the next grid silently incomparable to them under the same name.
+#
+# A different model is a DIFFERENT MANIFEST. Send it to its own S18_OUT and report
+# it separately - the model string is frozen into the manifest below precisely so
+# that whether two grids are poolable is a question the evidence answers.
+MODEL = os.getenv("S18_MODEL", "stealth/ox-alpha")
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 TEMPERATURE = 0.2
 MAX_TOKENS = 16000          # reasoning tokens are drawn from this same budget
