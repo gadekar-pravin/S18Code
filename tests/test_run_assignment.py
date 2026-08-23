@@ -580,3 +580,29 @@ def test_model_honours_s18_model_so_a_named_model_gets_its_own_manifest(
         importlib.reload(runner)
     assert runner.MODEL == default, "the override must not leak into later runs"
     assert runner.freeze_manifest({}, "pytest 9.1.1")["model"] == default
+
+
+def test_git_dirty_excludes_the_configured_out_not_a_hardcoded_name(monkeypatch):
+    """Found 2026-08-23 by the qwen replication stamping git_dirty:true on a
+    clean checkout.
+
+    The dirty check excluded the literal `proofs/assignment_v1`, so a grid sent
+    elsewhere by S18_OUT counted its own output directory as source dirt - the
+    false signal this field exists to remove. Worse, it was non-deterministic:
+    it fired only if that directory already held a file when the manifest froze.
+    """
+    repo = pathlib.Path(runner.__file__).resolve().parent
+    assert importlib.reload(runner)._out_relative_to(repo) == "proofs/assignment_v1"
+
+    monkeypatch.setenv("S18_OUT", str(repo / "proofs" / "somewhere_else"))
+    try:
+        assert importlib.reload(runner)._out_relative_to(repo) == \
+            "proofs/somewhere_else"
+        # an OUT outside the repository cannot dirty it, so excluding that path
+        # would silence unrelated real changes; fall back to the default.
+        monkeypatch.setenv("S18_OUT", "/tmp/outside-the-repo")
+        assert importlib.reload(runner)._out_relative_to(repo) == \
+            "proofs/assignment_v1"
+    finally:
+        monkeypatch.delenv("S18_OUT", raising=False)
+        importlib.reload(runner)

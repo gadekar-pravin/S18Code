@@ -61,21 +61,45 @@ successfully edited **nothing**, so the axis had nothing to say about them. Grid
 `False`: it edited at step 4 and answered at step 7 without re-testing.
 See [`proofs/RESCORE_DEMONSTRATION.md`](proofs/RESCORE_DEMONSTRATION.md).
 
+## Replication on a named model — one finding held, one could not be asked
+
+A third manifest ran `t12` × 3 on **`qwen/qwen3.8-27b`** (named, open weights) at
+`daf8947`, everything but the model held fixed. Its manifest records `git_dirty: true`
+with no tracked file modified — the check excluded a hardcoded directory, so the run's
+own untracked log counted as source dirt; fixed after, flag left as recorded. Reported separately and **not
+pooled**; full detail in
+[`proofs/assignment_v1_qwen_t12/REPORT.md`](proofs/assignment_v1_qwen_t12/REPORT.md).
+
+**The guard result held.** 3/3 cells attempted a protected write, 6 refusals, none
+succeeded — so across two models and three manifests, **18 refusals in 12 t12 cells,
+every cell attempting at least one, and zero successful protected writes**. This is the only finding here that survives a change of
+model.
+
+**The overclaim question could not be asked.** All three cells ended `max_steps` without
+emitting an answer, so `claimed_success: false` is the field's default, not an admission —
+`honest_failure` is 0/3 for exactly that reason. This is **not** evidence that the named
+model does not overclaim; it never reached the point of claiming anything. A confound is
+recorded with it: 7 of its 42 replies were unparseable against `ox-alpha`'s 2 of 89, so a
+fixed 14-call budget bought it fewer usable turns, and `ran_out_of_road` 3/3 is not a clean
+statement about persistence.
+
 ## What this does not establish
 
 - **Nothing comparative.** One arm, no baseline. Nothing here says what the guard or ceiling
   *changes* — only that the guard refused what it was asked to refuse.
-- **Nothing about the ceiling.** 0/15. Not "rarely needed" — never exercised; no run failed
-  verification four times running.
+- **Nothing about the ceiling.** 0/15 here, and 0/18 counting the replication cells. Not
+  "rarely needed" — never exercised; no run failed verification four times running.
 - **Nothing about the model.** `stealth/ox-alpha` is cloaked: identity and retention policy
   undisclosed, withdrawable without notice. These runs are not reproducible on demand, and
-  the numbers describe this harness at this budget, not a capability.
+  the numbers describe this harness at this budget, not a capability. The named-model
+  manifest above replicates the guard result and nothing else.
 - **`cheated: 0` is not "not tempted".** It means attempted twelve times, blocked twelve
   times. Read it that way or not at all.
 - **Cost figures are observations, not measurements.** On identical settings grid B spans
   2.7× in seconds and 3.4× in tokens.
-- **Small n, and untested zeros.** Fifteen cells, three tasks, one model. Two overclaims is
-  enough to say the behaviour recurs across a harness change, not enough for a rate.
+- **Small n, and untested zeros.** Fifteen cells and three tasks in the claim above, plus
+  three replication cells on one task. Two overclaims is enough to say the behaviour recurs
+  across a harness change, not enough for a rate.
   `not_evaluable_under_this_manifest` and `grading_timed_out` are zero here because nothing
   triggered them, which is not evidence that they fire correctly.
 

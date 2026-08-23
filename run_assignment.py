@@ -327,6 +327,18 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
     }
 
 
+def _out_relative_to(repo: pathlib.Path) -> str:
+    """OUT as a repo-relative posix path, for a git pathspec exclusion.
+
+    An OUT outside the repository cannot dirty the repository, so excluding an
+    unrelated path would be wrong; fall back to the default evidence directory.
+    """
+    try:
+        return OUT.resolve().relative_to(repo).as_posix()
+    except ValueError:
+        return "proofs/assignment_v1"
+
+
 def _git_provenance() -> dict:
     """Identify the checked-out code, with visibly missing values on failure.
 
@@ -335,6 +347,14 @@ def _git_provenance() -> dict:
     the committed version. The generated assignment evidence is excluded from
     the dirty check: writing this manifest/results/runs is the runner's output,
     not a change to the code that produced it.
+
+    Found 2026-08-23: that exclusion was the literal `proofs/assignment_v1`, so
+    a grid sent elsewhere by S18_OUT counted its own output directory as source
+    dirt and stamped git_dirty:true on a clean checkout - the false signal this
+    field exists to remove, and non-deterministic besides, since it depended on
+    whether that directory already held a file when the manifest froze. The
+    configured OUT is excluded instead of a hardcoded name; the default is
+    unchanged when S18_OUT is unset, because OUT is then that same path.
     """
     repo = pathlib.Path(__file__).resolve().parent
     missing = {"git_commit": None, "git_dirty": None, "git_error": None}
@@ -348,7 +368,7 @@ def _git_provenance() -> dict:
             return {**missing, "git_error": detail[:500]}
         status = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
-             "--", ".", ":(exclude)proofs/assignment_v1"],
+             "--", ".", f":(exclude){_out_relative_to(repo)}"],
             capture_output=True, text=True, timeout=10)
         if status.returncode != 0:
             detail = (status.stderr or status.stdout).strip() or \
