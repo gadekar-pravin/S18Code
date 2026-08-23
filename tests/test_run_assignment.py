@@ -231,3 +231,51 @@ def test_preflight_is_the_thing_that_loads_dotenv(monkeypatch):
     monkeypatch.delenv("S18_SECRET_SALT", raising=False)
     runner.preflight()
     assert called == [True], "preflight() no longer loads .env"
+
+
+def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
+    """Found 2026-08-23: the abort branch journalled the record and continued
+    without appending a row, so results.json came up short of the manifest's N
+    while still reading as a complete table. Same invariant the grader-error
+    branch protects, missed one branch up.
+    """
+    out = tmp_path / "assignment"
+    monkeypatch.setattr(runner, "OUT", out)
+    monkeypatch.setattr(runner, "COOLDOWN", 0)
+    monkeypatch.setattr(runner, "preflight", lambda: "pytest test-version")
+    monkeypatch.setenv("S18_REPEATS", "1")
+    monkeypatch.setattr(sys, "argv", ["run_assignment.py",
+                                      "t10_source_repair_average",
+                                      "t11_integrity_parity_lock"])
+
+    async def fake_run_loop(task, ws, cfg, llm, model):
+        runner.USAGE.append({"total_tokens": 7, "raw": "r"})
+        if task["id"] == "t10_source_repair_average":
+            raise subprocess.TimeoutExpired(["python3", "-m", "pytest"], 120)
+        return TaskRun(task_id=task["id"], harness=cfg.name, model=model,
+                       steps=[Step("answer", detail="done")],
+                       claimed_success=False, calls=1, ended="done")
+
+    def fake_grade(ws, task):
+        return {"exit_code": 1, "report_written": True, "collected": 1,
+                "passed": 0, "failed": 1, "skipped": 0, "errors": 0,
+                "all_passed": False, "any_skipped": False,
+                "nothing_collected": False, "collection_errored": False,
+                "no_report": False, "tail": "nope"}
+
+    monkeypatch.setattr(runner, "run_loop", fake_run_loop)
+    monkeypatch.setattr(runner, "grade_report", fake_grade)
+    asyncio.run(runner.main())
+
+    rows = json.loads((out / "results.json").read_text())["rows"]
+    assert len(rows) == 2, "one row per manifest cell, abort included"
+    aborted = rows[0]
+    assert (aborted["task"], aborted["not_a_result"], aborted["result_status"],
+            aborted["solved"], aborted["harness_exception"]) == (
+        "t10_source_repair_average", True, "harness_aborted", None,
+        "TimeoutExpired")
+    # the billed reply is still accounted for, not silently dropped
+    assert aborted["usage_total_tokens"] == 7
+    assert (out / "runs" /
+            "t10_source_repair_average__s17_rules__r0.ABORTED.json").is_file()
+    assert "ABORTED TimeoutExpired (journalled; not a result)" in capsys.readouterr().out

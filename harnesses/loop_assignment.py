@@ -163,11 +163,20 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
     history: list[str] = []
     consecutive_fail = 0
     workspace_root = ws.resolve()
-    declared_writable = {
-        resolved.relative_to(workspace_root).as_posix()
-        for rel in writable_paths(task)
-        if (resolved := resolve_in_workspace(ws, rel)) is not None
-    }
+    # No `if resolved is not None` filter here any more. It silently dropped a
+    # declared path that escaped the workspace, while grade_clean_room raised on
+    # the same input - so one malformed declaration made the file unwritable for
+    # the whole run and then surfaced as an abort at final grading. Both sides
+    # now inherit one rule: writable_paths() validates and raises, so a bad task
+    # fails before the first model call. A None here would be a bug, not input.
+    declared_writable = set()
+    for rel in writable_paths(task):
+        resolved = resolve_in_workspace(ws, rel)
+        if resolved is None:                       # pragma: no cover - see above
+            raise ValueError(
+                f"{task.get('id', '<task>')}: declared writable path {rel!r} does "
+                f"not resolve inside the workspace")
+        declared_writable.add(resolved.relative_to(workspace_root).as_posix())
 
     for _ in range(cfg.max_steps):
         listing = sorted(str(p.relative_to(ws)) for p in ws.rglob("*.py"))

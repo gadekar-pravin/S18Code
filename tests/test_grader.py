@@ -26,7 +26,7 @@ import pytest
 from S18Code.harnesses.loop import PROTECTED, _protected
 from S18Code.tasks.materialise import (derive_status, grade_clean_room,
                                        grade_report, materialise,
-                                       run_tests, sanitized_env)
+                                       run_tests, sanitized_env, writable_paths)
 
 def assert_real_failure(tail: str, expect: str) -> None:
     """A False from run_tests is only evidence if pytest actually ran.
@@ -314,3 +314,21 @@ def test_a_missing_report_is_not_read_as_zero_counts():
     assert (r["no_report"], r["report_written"], r["all_passed"]) == (True, False, False)
     assert r["nothing_collected"] is False, (
         "absent evidence must not masquerade as an observed empty run")
+
+
+def test_a_declared_writable_path_that_escapes_is_refused_at_load():
+    """Found 2026-08-23. The two consumers of this list disagreed: the clean
+    room raised on an escaping declaration while the loop silently dropped it,
+    so one malformed task made the file unwritable for a whole run and then
+    surfaced as an abort at final grading. Validating here means both inherit
+    one rule and a bad task fails before the first model call."""
+    for bad in ("../evals/axes.py", "/etc/passwd", "a/../../b.py", ""):
+        with pytest.raises(ValueError):
+            writable_paths({"id": "t_bad", "files": {}, "writable": [bad]})
+
+
+def test_ordinary_declarations_still_pass_validation():
+    """The control: a validator that rejects everything also 'closes' the bug."""
+    assert writable_paths({"id": "t_ok", "files": {"calc.py": ""}}) == ("calc.py",)
+    assert writable_paths({"id": "t_ok", "files": {},
+                           "writable": ["calc.py", "pkg/mod.py"]}) == ("calc.py", "pkg/mod.py")

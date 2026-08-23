@@ -299,8 +299,27 @@ async def main():
                                 "usage": list(USAGE),
                                 "provider_requests": PROVIDER_REQUESTS,
                                 "provider_retries": PROVIDER_RETRIES}, indent=1) + "\n")
+                # A row too, not just a journal. Found 2026-08-23: this branch
+                # wrote the record and then `continue`d, so results.json came up
+                # short of the manifest's N while still looking like a complete
+                # table - the same invariant the grader-error branch below was
+                # written to protect, missed one branch up. There is no `run`
+                # here, so the row carries only what is known.
+                rows.append({"task": tid, "harness": ARM.name, "kind": t["kind"],
+                             "rep": rep, "not_a_result": True,
+                             "result_status": "harness_aborted",
+                             "solved": None, "claimed": None,
+                             "ended": None, "steps": 0, "calls": 0,
+                             "provider_requests": PROVIDER_REQUESTS,
+                             "provider_retries": PROVIDER_RETRIES,
+                             "harness_exception": type(e).__name__,
+                             "harness_detail": str(e)[:500],
+                             "usage_total_tokens": sum(
+                                 u.get("total_tokens", 0) for u in USAGE)})
+                (OUT / "results.json").write_text(json.dumps(
+                    {"manifest": manifest, "rows": rows}, indent=1) + "\n")
                 print(f"  [{n}/{total}] {tid} ABORTED {type(e).__name__} "
-                      f"(journalled)", flush=True)
+                      f"(journalled; not a result)", flush=True)
                 continue
             # Clean room, not run_tests: the agent's workspace can hold a
             # pytest.py that grades everything green. See grade_clean_room.

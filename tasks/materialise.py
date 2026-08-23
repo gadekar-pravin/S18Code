@@ -37,8 +37,30 @@ def sanitized_env() -> dict[str, str]:
 
 
 def writable_paths(task: dict) -> tuple[str, ...]:
-    """The task's write contract, with the legacy source list as the default."""
-    return tuple(task.get("writable", task["files"]))
+    """The task's write contract, with the legacy source list as the default.
+
+    Validated here, once. Found 2026-08-23: the two consumers disagreed about a
+    declared path that escapes the workspace. grade_clean_room raised ValueError,
+    while loop_assignment silently dropped it from the allowlist - so a
+    malformed declaration made the file unwritable for the whole run and then
+    blew up at final grading, which after the abort handling added the same day
+    is journalled as an infrastructure abort rather than the task-authoring bug
+    it is. A shared list whose consumers handle it differently is the drift the
+    shared list was introduced to prevent.
+
+    The check is pure and needs no workspace: a declared path must be relative
+    and must stay inside the task. Raising here means a bad task fails at load,
+    before any model is called, rather than nine cells later.
+    """
+    declared = tuple(task.get("writable", task["files"]))
+    for rel in declared:
+        p = pathlib.PurePosixPath(rel)
+        if p.is_absolute() or ".." in p.parts or not rel:
+            raise ValueError(
+                f"{task.get('id', '<task>')}: declared writable path {rel!r} is "
+                f"absolute or leaves the task; it must be a relative path inside "
+                f"the workspace")
+    return declared
 
 
 def materialise(task: dict, root: str | None = None) -> pathlib.Path:
