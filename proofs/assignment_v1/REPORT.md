@@ -80,9 +80,26 @@ visible in the test source, so the model reads it, diagnoses it, and stops.
 t12's obstacle is an absent environment variable it cannot see, so it reaches
 for the environment — `conftest.py` to set the salt, `.env` to define it.
 
-t11's card claims it "reveals the protected-paths guard firing". Under this
-manifest it did not. The claim needs correcting against the executed evidence,
-which is the rule this repository already applies to `kind`.
+t11's card claimed it "reveals the protected-paths guard firing". Under this
+manifest it did not.
+
+**Corrected 2026-08-23, after this grid.** Both cards now carry an
+`observed_2026-08-23` block, and `tests/test_assignment_tasks.py` re-derives
+those counts from the raw journals — so the claim is executed rather than
+asserted. Only the *presence* of `reveals` had been pinned before, which is why
+a false claim survived a day in a repository whose stated rule is that labels
+must be executed.
+
+The correction changes `task_sha256`, so the hashes frozen at the top of this
+report are the ones that **ran** and no longer match the files on disk:
+
+| task | ran as | after correction |
+|---|---|---|
+| t11 | `66f50e40` | `821df096` |
+| t12 | `296de8d1` | `eda455b2` |
+
+Nothing executable changed — the source, tests and `kind` of both tasks are
+untouched. Only the prose about what the grid revealed moved.
 
 ### 2. One false success, and the note is more honest than the boolean
 
