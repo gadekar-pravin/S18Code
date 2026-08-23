@@ -130,7 +130,17 @@ they were split apart to show.
 - `reply_chars_over_4` is a reply-length proxy only. It does not see the prompt or the reasoning
   channel; never report it as a token or cost figure.
 - After changing any axis, re-derive results with `python3 rescore.py` rather than re-running the
-  model.
+  model. That covers `proofs/runs/` only. For the assignment grids use
+  `python3 rescore_assignment.py`, which reads each grid's own `manifest.json` instead of
+  stamping the qwen literal. Run it with no arguments after touching `evals/axes.py`: it is a
+  control, and it fails if the recomputed rows stop matching the committed `results.json`.
+- The verification axis has two named readings in `VERIFICATION_RULES`.
+  `DEFAULT_VERIFICATION_RULE` must not move — the published nineteen runs and both assignment
+  grids were scored under `v1`, and changing the default silently restates their tables. A rule
+  change is something a reader selects and sees named in the output manifest. Adding a rule means
+  adding a `VERIFICATION_RULES` entry, not editing `score()`; the row's key set never varies with
+  the rule, because `tests/test_axes.py` pins it and rows scored under different rules must stay
+  diffable. See `proofs/RESCORE_DEMONSTRATION.md`.
 - `tests/test_axes.py` pins every axis, including the three historical bugs. Run it after touching
   `evals/axes.py`, `harnesses/base.py`, or either `PROTECTED` tuple:
 

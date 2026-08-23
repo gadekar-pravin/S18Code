@@ -87,6 +87,24 @@ python3 rescore.py
 
 `run_benchmark.py` is the hosted-model variant (Gemini). It needs `GEMINI_API_KEYS`.
 
+### Rescoring a saved grid under a different rule
+
+`rescore.py` handles the local grid only — it globs `proofs/runs/` and stamps
+`qwen3.8:27b` into every row. The assignment grids get their own tool, which reads each
+grid's own manifest:
+
+```bash
+python3 rescore_assignment.py                                        # control: rows must match results.json
+python3 rescore_assignment.py --rule v2_command_after_last_edit --write
+python3 rescore_assignment.py --list-rules
+```
+
+Both are zero-model-call. The first re-derives every row and fails loudly if it no
+longer matches what the grid published; the second re-scores the same journals under
+the stricter verification rule and reports which rows move. Worked example, with the
+raw step traces behind each flip, in
+[`proofs/RESCORE_DEMONSTRATION.md`](proofs/RESCORE_DEMONSTRATION.md).
+
 ## What is deliberately in here
 
 `proofs/results_local.INVALID_scorer_bug.json` and
@@ -102,7 +120,8 @@ harnesses/   base.py (TaskRun, Step), loop.py (one loop, two configs)
 tasks/       nine task definitions, a manifest with every correction, materialise.py
 evals/       axes.py — the scorers, each with the bug it once had written into it
 proofs/      raw runs, results, the attack matrix, the spec-game solutions
-rescore.py   recompute all axes from disk
+rescore.py   recompute all axes from disk (local grid)
+rescore_assignment.py  re-derive an assignment grid under a named scoring rule
 ```
 
 ## Licence
