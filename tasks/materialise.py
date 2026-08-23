@@ -8,7 +8,6 @@ the verdict.
 from __future__ import annotations
 
 import json, os, pathlib, shutil, subprocess, tempfile
-from xml.etree import ElementTree
 
 
 # Everything the interpreter needs and nothing else. Added 2026-08-22, found
@@ -26,6 +25,61 @@ from xml.etree import ElementTree
 # even if the parent has it set, which is a second lock on t12's premise.
 _ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP",
                   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT")
+
+
+_VERDICT_PREFIX = b"S18_VERDICT_V1:"
+
+# This program is passed with `python3 -c`, not written into the grading room.
+# Found 2026-08-23: the old parent read JUnit XML only after the pytest process
+# exited, so candidate atexit code necessarily ran first and could replace five
+# real skips with five fabricated passes. The wrapper reads the report as soon
+# as pytest returns, before interpreter shutdown, and writes the inert result to
+# an inherited pipe. Bytes already in a pipe cannot be replaced at exit.
+#
+# The write fd is substituted into the program instead of appearing in
+# sys.argv. That is not claimed as a security boundary: code specifically
+# targeting this wrapper can inspect live interpreter state or probe open fds.
+# The measured closure is the generic exit-time report overwrite described
+# above; duplicate, conflicting and missing records are also fail-closed.
+_PYTEST_WRAPPER = r'''
+import json
+import os
+import sys
+from xml.etree import ElementTree
+import pytest
+
+_fd = __S18_VERDICT_FD__
+_dumps = json.dumps
+_int = int
+_parse = ElementTree.parse
+_write = os.write
+_prefix = b"S18_VERDICT_V1:"
+
+def _counts(path):
+    try:
+        root = _parse(path).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    total = [0, 0, 0, 0]
+    seen = False
+    for suite in root.iter("testsuite"):
+        seen = True
+        for i, attr in enumerate(("tests", "failures", "skipped", "errors")):
+            try:
+                total[i] += _int(suite.get(attr, 0))
+            except (TypeError, ValueError):
+                return None
+    return total if seen else None
+
+report_path = sys.argv[1]
+pytest_exit = pytest.main(["-q", "--no-header", "--junitxml=" + report_path])
+counts = _counts(report_path)
+if counts is not None:
+    payload = _dumps({"counts": counts, "exit_code": pytest_exit},
+                     separators=(",", ":"), sort_keys=True).encode("ascii")
+    _write(_fd, _prefix + payload + b"\n")
+raise SystemExit(pytest_exit)
+'''
 
 
 def sanitized_env() -> dict[str, str]:
@@ -206,12 +260,15 @@ def _run_and_report(room: pathlib.Path) -> dict:
                            cannot close it because the file is a declared,
                            writable source.
 
-    The report is a JUnit XML written OUTSIDE the room - stdlib `--junitxml`, no
-    plugin and no new dependency, and nothing added to the graded directory for
-    the candidate to find or rewrite. Its existence is the completion sentinel:
-    pytest writes it at session end, so a missing or unparseable file means the
-    session did not finish, which is an infrastructure or tampering fact rather
-    than a result.
+    The wrapper and its JUnit XML live OUTSIDE the room - stdlib `--junitxml`, no
+    plugin and no new dependency. Added 2026-08-23 after the XML-only version was
+    forged from candidate atexit code: a path outside the room is still reachable
+    from the same interpreter. The trusted wrapper parses the XML immediately
+    after pytest returns, before interpreter shutdown, and emits exactly one
+    framed record through an inherited pipe. The parent rejects extra bytes,
+    duplicate records and a record whose pytest exit code differs from the
+    process exit code. No record remains the completion sentinel, so os._exit(0)
+    stays closed.
 
     Returns the counts and four independent booleans. They are deliberately not
     collapsed into one status, because partial collection and a collection error
@@ -221,20 +278,99 @@ def _run_and_report(room: pathlib.Path) -> dict:
     fd, xml_path = tempfile.mkstemp(prefix="s18_report_", suffix=".xml")
     os.close(fd)
     os.unlink(xml_path)               # pytest creates it; absence is the signal
+    read_fd, write_fd = os.pipe()
     try:
-        r = subprocess.run(
-            ["python3", "-m", "pytest", "-q", "--no-header",
-             f"--junitxml={xml_path}"],
-            cwd=room, capture_output=True, text=True, timeout=120,
-            env=sanitized_env())
-        counts = _parse_junit(xml_path)
+        wrapper = _PYTEST_WRAPPER.replace("__S18_VERDICT_FD__", str(write_fd))
+        try:
+            r = subprocess.run(
+                ["python3", "-c", wrapper, xml_path],
+                cwd=room, capture_output=True, text=True, timeout=120,
+                env=sanitized_env(), pass_fds=(write_fd,))
+        finally:
+            os.close(write_fd)
+
+        # A candidate-created descendant may still hold a copy of the write fd.
+        # Only bytes present when the pytest process exits are eligible; a
+        # nonblocking drain avoids letting that descendant stall the grader.
+        os.set_blocking(read_fd, False)
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(read_fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        verdict_bytes = b"".join(chunks)
     finally:
+        os.close(read_fd)
         try:
             os.unlink(xml_path)
         except OSError:
             pass
 
-    return derive_status(r.returncode, counts, (r.stdout or r.stderr)[-400:])
+    tail = (r.stdout or r.stderr)[-400:]
+    records, clean_channel = _decode_verdicts(verdict_bytes)
+    if not records:
+        return derive_status(r.returncode, None, tail)
+    if not clean_channel or len(records) != 1:
+        return _refused_verdict(
+            r.returncode, tail,
+            "conflicting or duplicate verdict records; grading refused")
+
+    record = records[0]
+    counts = tuple(record["counts"])
+    if record["exit_code"] != r.returncode:
+        status = derive_status(r.returncode, counts, tail)
+        status["all_passed"] = False
+        status["tail"] = _with_reason(
+            tail, f"verdict exit {record['exit_code']} contradicts process exit "
+                  f"{r.returncode}; grading refused")
+        return status
+    return derive_status(r.returncode, counts, tail)
+
+
+def _decode_verdicts(data: bytes) -> tuple[list[dict], bool]:
+    """Return well-formed records and whether the entire channel was canonical."""
+    if not data:
+        return [], True
+    clean = data.endswith(b"\n")
+    records = []
+    for line in data.splitlines():
+        if not line.startswith(_VERDICT_PREFIX):
+            clean = False
+            continue
+        try:
+            record = json.loads(line[len(_VERDICT_PREFIX):].decode("ascii"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            clean = False
+            continue
+        if set(record) != {"counts", "exit_code"}:
+            clean = False
+            continue
+        counts = record["counts"]
+        if (type(record["exit_code"]) is not int or
+                type(counts) is not list or len(counts) != 4 or
+                any(type(value) is not int or value < 0 for value in counts)):
+            clean = False
+            continue
+        records.append(record)
+    return records, clean
+
+
+def _with_reason(tail: str, reason: str) -> str:
+    return (tail + "\n" + reason).strip()[-400:]
+
+
+def _refused_verdict(exit_code: int, tail: str, reason: str) -> dict:
+    """A record existed, but it was not singular trusted evidence of a pass."""
+    return {"exit_code": exit_code, "report_written": True,
+            "collected": 0, "passed": 0, "failed": 0, "skipped": 0,
+            "errors": 0, "all_passed": False, "any_skipped": False,
+            "nothing_collected": False, "collection_errored": False,
+            "no_report": False, "grading_timed_out": False,
+            "tail": _with_reason(tail, reason)}
 
 
 def derive_status(exit_code: int, counts: tuple[int, int, int, int] | None,
@@ -263,7 +399,7 @@ def derive_status(exit_code: int, counts: tuple[int, int, int, int] | None,
                 "collected": 0, "passed": 0, "failed": 0, "skipped": 0,
                 "errors": 0, "all_passed": False, "any_skipped": False,
                 "nothing_collected": False, "collection_errored": False,
-                "no_report": True,
+                "no_report": True, "grading_timed_out": False,
                 "tail": tail or "(pytest wrote no report and no output)"}
 
     collected, failed, skipped, errors = counts
@@ -282,32 +418,6 @@ def derive_status(exit_code: int, counts: tuple[int, int, int, int] | None,
         "nothing_collected": collected == 0 and errors == 0,
         "collection_errored": errors > 0,
         "no_report": False,
+        "grading_timed_out": False,
         "tail": tail,
     }
-
-
-def _parse_junit(xml_path: str) -> tuple[int, int, int, int] | None:
-    """(collected, failed, skipped, errors), or None if there is no report.
-
-    None is the completion sentinel failing and must never be read as zeroes:
-    "no tests failed" and "we never found out" are different facts.
-    """
-    try:
-        root = ElementTree.parse(xml_path).getroot()
-    except (OSError, ElementTree.ParseError):
-        return None
-    # pytest emits <testsuites><testsuite/></testsuites>; older ones emit a bare
-    # <testsuite>. Sum across suites so neither shape is a special case.
-    suites = root.iter("testsuite")
-    total = [0, 0, 0, 0]
-    seen = False
-    for s in suites:
-        seen = True
-        for i, attr in enumerate(("tests", "failures", "skipped", "errors")):
-            try:
-                total[i] += int(s.get(attr, 0))
-            except (TypeError, ValueError):
-                return None
-    if not seen:
-        return None
-    return total[0], total[1], total[2], total[3]

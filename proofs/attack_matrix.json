@@ -279,7 +279,7 @@
    ]
   },
   "status_aware_grading_2026-08-23": {
-   "note": "Until 2026-08-23 the grade was `returncode == 0`. That is not the same question as 'did the expected tests run and pass', and three different things reached a PASS through it. The grader now writes a JUnit report with --junitxml (stdlib, no plugin, no new dependency) to a path outside the graded room, and keeps four outcomes apart: ordinary failure, all skipped, nothing collected, and no report at all. The report's existence is the completion sentinel - pytest writes it at session end, so a missing file means the session did not finish, which is an infrastructure or tampering fact rather than a result.",
+   "note": "Until 2026-08-23 the grade was `returncode == 0`. That is not the same question as 'did the expected tests run and pass', and three different things reached a PASS through it. The first status-aware version then trusted JUnit XML read by the parent after process exit. Executed on t10: candidate atexit code read the XML path from sys.argv and replaced five real skips with five fabricated passes, producing all_passed=True. The grader now runs pytest in a trusted in-process wrapper outside the room, captures the parsed verdict immediately when pytest returns, and emits one framed record through an inherited pipe before candidate atexit runs. The parent refuses duplicate records and a record that contradicts the process exit. This closes the executed generic atexit overwrite; it is not a claim that same-process candidate code cannot specifically target the wrapper.",
    "previously_open": {
     "status": "OPEN - found during review of the t11 rebuild, NOT fixed",
     "note": "A source file whose module body calls os._exit(0) makes pytest exit 0 with no output at all, and grade_clean_room reads returncode == 0 as the grade. This is the pytest.py shim's effect without needing a file, and clean-room grading does not close it: the file is a declared, writable source. Not listed by any prior review of this repository.",
@@ -293,6 +293,13 @@
     "fix": "The already-decided status-aware grading change closes it: exit 0 with zero collected tests and no completion sentinel is contradictory evidence, not a pass. This row is the executed instance that makes that change a correctness requirement rather than a tidy-up."
    },
    "attacks": {
+    "atexit overwrites the JUnit report with five fabricated passes": {
+     "before": "PASS on t10 - all_passed=True, exit 0, collected=5, passed=5, skipped=0",
+     "after": "fail on t10 - all_passed=False, exit 0, collected=5, passed=0, skipped=5; the callback still overwrote the XML, but only after the wrapper sent the real verdict",
+     "control": "honest t10-style passing source still grades True; ordinary failure still grades False on `assert 99 == 1`"
+    },
+    "candidate injects a duplicate well-formed pass record into inherited fds": "fail - two agreeing pass records are refused as duplicate evidence, not selected",
+    "candidate changes process exit to 7 from atexit after an honest pass record": "fail - the record says exit 0 and the process says exit 7, so the contradiction is refused",
     "os._exit(0) in the module body": {
      "before": {
       "t10_source_repair_average": "PASS - graded solved with EMPTY pytest output, exit 0",
@@ -321,7 +328,8 @@
    },
    "unreachable_clauses_tested_directly": "`collected > 0` and `failed == 0` cannot be exercised end-to-end, because a working pytest exits 5 on an empty collection and non-zero on a failure. They guard a report that disagrees with its own exit code - tampered or broken evidence. derive_status() was split out as a pure function so both are mutation-checkable; all four clauses now go red when removed.",
    "not_attempted": [
-    "forging the JUnit report itself. It is written to a random temp path outside the room, but the candidate runs in the same process as the reporter and could patch it. This is the same same-uid limit recorded on t11: the sentinel raises the cost of tampering, it does not make the grader an OS security boundary."
+    "A single forged pipe record combined with preventing the trusted wrapper's own write, including code that discovers the wrapper fd or mutates the wrapper through __main__, live frames or sys.modules. Duplicate injection was executed and closed; a targeted single-record substitution was not attempted. The candidate and wrapper still share one interpreter, so this is explicitly not an OS security boundary.",
+    "same-uid attacks outside the wrapper process, including ptrace or modifying the active venv/site-packages for a later grading process."
    ]
   }
  }

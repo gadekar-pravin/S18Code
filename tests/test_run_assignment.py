@@ -14,7 +14,7 @@ from S18Code.harnesses.base import Step, TaskRun
 from S18Code import run_assignment as runner
 
 
-def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, capsys):
+def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypatch, capsys):
     out = tmp_path / "assignment"
     monkeypatch.setattr(runner, "OUT", out)
     monkeypatch.setattr(runner, "COOLDOWN", 0)
@@ -46,7 +46,8 @@ def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, 
                 "passed": 0, "failed": 1, "skipped": 0, "errors": 0,
                 "all_passed": False, "any_skipped": False,
                 "nothing_collected": False, "collection_errored": False,
-                "no_report": False, "tail": "assertion failed"}
+                "no_report": False, "grading_timed_out": False,
+                "tail": "assertion failed"}
 
     class _ReachedTheProvider(BaseException):
         """Deliberately not an Exception.
@@ -80,28 +81,64 @@ def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, 
         "usage": journal["usage"],
         "provider_counts": (journal["provider_requests"], journal["provider_retries"]),
         "final_files": sorted(journal["final_files"]),
-        "error_type": journal["grading_error"]["exception"],
-        "bounded_detail": len(journal["grading_error"]["detail"]) <= 500,
+        "timed_out": journal["grading_report"]["grading_timed_out"],
+        "no_report": journal["grading_report"]["no_report"],
     } == {
-        "actually_passed": None,
-        "pytest_tail": None,
+        "actually_passed": False,
+        "pytest_tail": "pytest timed out after 120 seconds",
         "steps": [{"kind": "edit", "target": "calc.py", "ok": True, "detail": ""},
                   {"kind": "answer", "target": "", "ok": True, "detail": "done"}],
         "usage": [{"total_tokens": 1, "raw": "reply-1"}],
         "provider_counts": (2, 1),
         "final_files": ["calc.py"],
-        "error_type": "TimeoutExpired",
-        "bounded_detail": True,
+        "timed_out": True,
+        "no_report": True,
     }
 
     results = json.loads((out / "results.json").read_text())["rows"]
-    assert [(row["task"], row.get("not_a_result"), row["solved"])
+    assert [(row["task"], row.get("not_a_result"), row["solved"],
+             row["grading_timed_out"])
             for row in results] == [
-        ("t10_source_repair_average", True, None),
-        ("t11_integrity_parity_lock", None, False),
+        ("t10_source_repair_average", None, False, True),
+        ("t11_integrity_parity_lock", None, False, False),
     ]
-    assert "GRADER_ERROR TimeoutExpired (run journalled; not a result)" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "solved=False" in output and "grading_timed_out" in output
     assert counts_at_cell_start == [(0, 0), (0, 0)]
+
+
+def test_non_timeout_grader_exception_remains_not_a_result(
+        tmp_path, monkeypatch, capsys):
+    """Found 2026-08-23: only candidate-caused timeouts move categories."""
+    out = tmp_path / "assignment"
+    monkeypatch.setattr(runner, "OUT", out)
+    monkeypatch.setattr(runner, "COOLDOWN", 0)
+    monkeypatch.setattr(runner, "preflight", lambda: "pytest test-version")
+    monkeypatch.setenv("S18_REPEATS", "1")
+    monkeypatch.setattr(sys, "argv", ["run_assignment.py",
+                                      "t10_source_repair_average"])
+
+    async def fake_run_loop(task, ws, cfg, llm, model):
+        runner.USAGE.append({"total_tokens": 8, "raw": "reply"})
+        return TaskRun(task_id=task["id"], harness=cfg.name, model=model,
+                       steps=[Step("answer", detail="done")],
+                       claimed_success=True, calls=1, ended="done")
+
+    def broken_grader(ws, task):
+        raise OSError("grader implementation broke")
+
+    monkeypatch.setattr(runner, "run_loop", fake_run_loop)
+    monkeypatch.setattr(runner, "grade_report", broken_grader)
+    asyncio.run(runner.main())
+
+    journal = json.loads((out / "runs" /
+        "t10_source_repair_average__s17_rules__r0.json").read_text())
+    row = json.loads((out / "results.json").read_text())["rows"][0]
+    assert (journal["actually_passed"], journal["usage"][0]["total_tokens"],
+            journal["grading_error"]["exception"]) == (None, 8, "OSError")
+    assert (row["not_a_result"], row["result_status"], row["solved"],
+            row["grader_exception"]) == (True, "grader_error", None, "OSError")
+    assert "GRADER_ERROR OSError (run journalled; not a result)" in capsys.readouterr().out
 
 
 class _Response:
@@ -251,7 +288,7 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     async def fake_run_loop(task, ws, cfg, llm, model):
         runner.USAGE.append({"total_tokens": 7, "raw": "r"})
         if task["id"] == "t10_source_repair_average":
-            raise subprocess.TimeoutExpired(["python3", "-m", "pytest"], 120)
+            raise OSError("workspace write broke")
         return TaskRun(task_id=task["id"], harness=cfg.name, model=model,
                        steps=[Step("answer", detail="done")],
                        claimed_success=False, calls=1, ended="done")
@@ -261,7 +298,7 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
                 "passed": 0, "failed": 1, "skipped": 0, "errors": 0,
                 "all_passed": False, "any_skipped": False,
                 "nothing_collected": False, "collection_errored": False,
-                "no_report": False, "tail": "nope"}
+                "no_report": False, "grading_timed_out": False, "tail": "nope"}
 
     monkeypatch.setattr(runner, "run_loop", fake_run_loop)
     monkeypatch.setattr(runner, "grade_report", fake_grade)
@@ -273,9 +310,9 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     assert (aborted["task"], aborted["not_a_result"], aborted["result_status"],
             aborted["solved"], aborted["harness_exception"]) == (
         "t10_source_repair_average", True, "harness_aborted", None,
-        "TimeoutExpired")
+        "OSError")
     # the billed reply is still accounted for, not silently dropped
     assert aborted["usage_total_tokens"] == 7
     assert (out / "runs" /
             "t10_source_repair_average__s17_rules__r0.ABORTED.json").is_file()
-    assert "ABORTED TimeoutExpired (journalled; not a result)" in capsys.readouterr().out
+    assert "ABORTED OSError (journalled; not a result)" in capsys.readouterr().out

@@ -19,7 +19,9 @@ Run from the repository root, with pytest importable by the active python3:
     python3 -m pytest tests -q
 """
 import asyncio
+import json
 import pathlib
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -236,6 +238,45 @@ def test_ceiling_stops_repeated_failing_verification(ws):
     assert run.ended == "ceiling"
     assert run.claimed_success is False
     assert run.steps[-1].detail == "repeat-failure ceiling"
+
+
+def test_candidate_timeout_is_a_failed_verification_and_advances_the_ceiling(
+        ws, monkeypatch):
+    """Found 2026-08-23: TimeoutExpired escaped run_loop and made the runner
+    journal the candidate's hang as an infrastructure abort. Canonical grading
+    tests do not create the hang; the candidate does.
+    """
+    prompts = []
+
+    async def keep_testing(prompt, system):
+        prompts.append(prompt)
+        return '{"action":"test"}'
+
+    def time_out(workspace, task):
+        raise subprocess.TimeoutExpired(["python3", "-m", "pytest"], 120)
+
+    monkeypatch.setattr(asg, "grade_clean_room", time_out)
+    run = asyncio.run(_run(keep_testing, ws, ceiling=2))
+    commands = [(step.kind, step.target, step.ok) for step in run.steps
+                if step.kind == "command"]
+    second_history = json.loads(prompts[1])["history"]
+
+    assert (commands, run.ended, run.claimed_success, run.steps[-1].detail) == (
+        [("command", "pytest -q", False), ("command", "pytest -q", False)],
+        "ceiling", False, "repeat-failure ceiling")
+    assert any("pytest timed out after 120 seconds" in line
+               for line in second_history)
+
+
+def test_non_timeout_grader_exception_still_propagates_as_harness_fault(
+        ws, monkeypatch):
+    """The timeout classification must not swallow genuine grader defects."""
+    def break_grader(workspace, task):
+        raise OSError("grader broke")
+
+    monkeypatch.setattr(asg, "grade_clean_room", break_grader)
+    with pytest.raises(OSError, match="grader broke"):
+        asyncio.run(_run(_scripted('{"action":"test"}'), ws))
 
 
 def test_max_steps_is_the_model_call_budget_not_the_step_count(ws):

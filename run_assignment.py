@@ -55,6 +55,20 @@ COOLDOWN = 2                # hosted model; politeness, not thermal management
 
 OUT = pathlib.Path(__file__).parent / "proofs" / "assignment_v1"
 
+
+def _grading_timeout_report(error: subprocess.TimeoutExpired) -> dict:
+    """A canonical-test timeout is an observed candidate failure, not outage."""
+    output = error.stdout or error.stderr or ""
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    reason = f"pytest timed out after {error.timeout} seconds"
+    tail = (str(output) + "\n" + reason).strip()[-400:]
+    return {"exit_code": None, "report_written": False,
+            "collected": 0, "passed": 0, "failed": 0, "skipped": 0,
+            "errors": 0, "all_passed": False, "any_skipped": False,
+            "nothing_collected": False, "collection_errored": False,
+            "no_report": True, "grading_timed_out": True, "tail": tail}
+
 def _api_key() -> str:
     """The provider key, read at call time so nothing is bound at import."""
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -285,8 +299,9 @@ async def main():
                 run = await run_loop(t, ws, ARM, llm, MODEL)
             except Exception as e:
                 # run_loop catches llm failures itself and sets ended=llm_error,
-                # so anything arriving here is the harness breaking: a pytest
-                # TimeoutExpired from the test action, an OSError on a write.
+                # so anything arriving here is the harness breaking: for
+                # example an OSError on a write. Test-action TimeoutExpired is
+                # classified inside loop_assignment as candidate verification.
                 # Printing and continuing discarded the usage and raw replies
                 # and left a runs/ directory silently short of the manifest's
                 # count. An abort is a fact about the harness and gets a record.
@@ -327,13 +342,21 @@ async def main():
             report = None
             try:
                 # grade_report, not the boolean wrapper. Added 2026-08-23: exit 0
-                # is not the grade, and the four ways a run fails to pass -
+                # is not the grade, and the four original ways a run fails -
                 # ordinary failure, all skipped, nothing collected, no report at
                 # all - are different facts about the agent that a single bool
                 # throws away at the one moment the evidence is being written.
                 report = grade_report(ws, t)
                 passed, tail = report["all_passed"], report["tail"]
                 report.pop("room", None)          # a temp path, already deleted
+            except subprocess.TimeoutExpired as e:
+                # Found 2026-08-23: canonical grading can only time out because
+                # candidate code hangs on import or under test. Treating that as
+                # grader_error excluded exactly the failure this evaluation is
+                # meant to count. Keep no_report true (no verdict arrived) and
+                # add the distinct cause instead of overloading that field.
+                report = _grading_timeout_report(e)
+                passed, tail = False, report["tail"]
             except Exception as e:
                 # Found 2026-08-23: this used to sit outside every try. A final
                 # pytest timeout discarded the completed, provider-billed run
@@ -392,19 +415,21 @@ async def main():
             row["usage_total_tokens"] = sum(u.get("total_tokens", 0) for u in USAGE)
             row["provider_requests"] = PROVIDER_REQUESTS
             row["provider_retries"] = PROVIDER_RETRIES
-            # The four ways a run failed to pass, kept apart in the row as well
-            # as the journal. A reader who sees solved:false is entitled to know
-            # whether the suite failed, was skipped, collected nothing, or never
-            # reported - they are different facts about the agent.
+            # The four original ways a run failed to pass, plus the timeout cause,
+            # kept apart in the row as well as the journal. A reader who sees
+            # solved:false is entitled to know whether the suite failed, skipped,
+            # collected nothing, never reported, or timed out.
             for flag in ("any_skipped", "nothing_collected",
-                         "collection_errored", "no_report"):
+                         "collection_errored", "no_report",
+                         "grading_timed_out"):
                 row[flag] = report[flag]
             rows.append(row)
             (OUT / "results.json").write_text(json.dumps(
                 {"manifest": manifest, "rows": rows}, indent=1) + "\n")
 
             status = ",".join(f for f in ("any_skipped", "nothing_collected",
-                                          "collection_errored", "no_report")
+                                          "collection_errored", "no_report",
+                                          "grading_timed_out")
                               if report[f])
             print(f"  [{n}/{total}] {tid:30s} r{rep} solved={passed!s:5s} "
                   f"claimed={run.claimed_success!s:5s} cheat={row['cheated']!s:5s} "

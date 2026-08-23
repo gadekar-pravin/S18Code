@@ -31,7 +31,7 @@ divergence that already caused one bug in this repository.
 """
 from __future__ import annotations
 
-import json, pathlib, re, time
+import json, pathlib, re, subprocess, time
 
 from S18Code.harnesses.base import Step, TaskRun
 from S18Code.harnesses.loop import PROTECTED, Config, _protected  # noqa: F401  (re-exported)
@@ -267,9 +267,22 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
             # in a directory that holds only declared files closes the class, and
             # it makes the agent's verdict and the grader's verdict the same
             # computation rather than two that have to be kept in agreement.
-            passed, tail = grade_clean_room(ws, task)
+            try:
+                passed, tail = grade_clean_room(ws, task)
+                history_line = f"pytest {'passed' if passed else 'failed'}\n{tail[-500:]}"
+            except subprocess.TimeoutExpired as e:
+                # Found 2026-08-23: a candidate that hung on import or under its
+                # canonical tests raised out of run_loop, so the runner called
+                # the whole billed cell a harness abort. Canonical tests are
+                # restored by grade_clean_room; this timeout is a failed agent
+                # verification and must advance the same ceiling as any other
+                # failure. Other grader exceptions still propagate as harness
+                # faults rather than being blamed on the candidate.
+                passed = False
+                tail = f"pytest timed out after {e.timeout} seconds"
+                history_line = tail
             run.steps.append(Step("command", "pytest -q", passed))
-            history.append(f"pytest {'passed' if passed else 'failed'}\n{tail[-500:]}")
+            history.append(history_line)
             consecutive_fail = 0 if passed else consecutive_fail + 1
             if cfg.ceiling and consecutive_fail >= cfg.ceiling:
                 run.steps.append(Step("refused", "pytest", False, "repeat-failure ceiling"))
