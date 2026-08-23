@@ -211,6 +211,7 @@ def preflight():
 
 def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
     """Written before the first call, so the configuration cannot drift mid-grid."""
+    git = _git_provenance()
     return {
         "model": MODEL,
         "endpoint": ENDPOINT,
@@ -221,6 +222,7 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
         # changes nothing else. loop.py is untouched, so the published qwen
         # comparison is unaffected.
         "harness": "harnesses/loop_assignment.py",
+        **git,
         "system_prompt_sha256": hashlib.sha256(SYSTEM.encode()).hexdigest()[:16],
         "provider": "openrouter",
         "temperature": TEMPERATURE,
@@ -247,6 +249,40 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
     }
 
 
+def _git_provenance() -> dict:
+    """Identify the checked-out code, with visibly missing values on failure.
+
+    Added 2026-08-23. A harness filename cannot identify the implementation
+    that produced a grid, and a commit SHA alone mislabels uncommitted code as
+    the committed version. The generated assignment evidence is excluded from
+    the dirty check: writing this manifest/results/runs is the runner's output,
+    not a change to the code that produced it.
+    """
+    repo = pathlib.Path(__file__).resolve().parent
+    missing = {"git_commit": None, "git_dirty": None, "git_error": None}
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if commit.returncode != 0:
+            detail = (commit.stderr or commit.stdout).strip() or \
+                f"git rev-parse exited {commit.returncode}"
+            return {**missing, "git_error": detail[:500]}
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
+             "--", ".", ":(exclude)proofs/assignment_v1"],
+            capture_output=True, text=True, timeout=10)
+        if status.returncode != 0:
+            detail = (status.stderr or status.stdout).strip() or \
+                f"git status exited {status.returncode}"
+            return {"git_commit": commit.stdout.strip(), "git_dirty": None,
+                    "git_error": detail[:500]}
+        return {"git_commit": commit.stdout.strip(),
+                "git_dirty": bool(status.stdout.strip()), "git_error": None}
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {**missing, "git_error": f"{type(e).__name__}: {e}"[:500]}
+
+
 async def main():
     global PROVIDER_REQUESTS, PROVIDER_RETRIES
     pytest_version = preflight()
@@ -257,10 +293,17 @@ async def main():
                  # and the published nine-task grid stays frozen.
                  for p in T.glob("t*.json")}
 
-    order = [a for a in sys.argv[1:] if a in all_tasks] or TASKS
-    unknown = [a for a in sys.argv[1:] if a not in all_tasks]
+    requested = sys.argv[1:]
+    unknown = [a for a in requested if a not in all_tasks]
     if unknown:
         raise SystemExit(f"unknown task ids: {unknown}")
+    # Found 2026-08-23: duplicate IDs produced the same journal name twice, so
+    # the later cell destroyed the earlier raw evidence while the manifest and
+    # total still counted both. Reject the ambiguous request instead of guessing.
+    duplicates = sorted({tid for tid in requested if requested.count(tid) > 1})
+    if duplicates:
+        raise SystemExit(f"duplicate task ids: {duplicates}")
+    order = requested or TASKS
     tasks = {tid: all_tasks[tid] for tid in order}
 
     reps = int(os.getenv("S18_REPEATS", "3"))
@@ -282,6 +325,13 @@ async def main():
             f"  mv {runs_dir} {runs_dir.parent / 'runs_<label>'}")
     runs_dir.mkdir(parents=True, exist_ok=True)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
+    # Found 2026-08-23: moving runs/ aside, as the no-clobber recovery says,
+    # left the previous grid's derived results.json beside this new manifest.
+    # Results are regenerable from immutable journals, so replace only this
+    # derived file with an empty current-manifest table before any cell starts.
+    results_path = OUT / "results.json"
+    results_path.write_text(json.dumps(
+        {"manifest": manifest, "rows": []}, indent=1) + "\n")
     print(f"  manifest frozen -> {OUT / 'manifest.json'}")
     print(f"  {len(order)} tasks x {reps} repeats = {len(order) * reps} runs, arm={ARM.name}\n")
 
@@ -348,7 +398,6 @@ async def main():
                 # throws away at the one moment the evidence is being written.
                 report = grade_report(ws, t)
                 passed, tail = report["all_passed"], report["tail"]
-                report.pop("room", None)          # a temp path, already deleted
             except subprocess.TimeoutExpired as e:
                 # Found 2026-08-23: canonical grading can only time out because
                 # candidate code hangs on import or under test. Treating that as
@@ -440,7 +489,7 @@ async def main():
                 await asyncio.sleep(COOLDOWN)
 
     results = sum(not row.get("not_a_result", False) for row in rows)
-    print(f"\n  wrote {OUT / 'results.json'}  "
+    print(f"\n  wrote {results_path}  "
           f"({len(rows)}/{total} cells, {results} results)")
     print(f"  journals in {runs_dir}")
 

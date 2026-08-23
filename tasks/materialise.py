@@ -197,38 +197,49 @@ def grade_report(workspace: pathlib.Path, task: dict) -> dict:
     and changing it would silently restate what that grid measured.
     """
     room = pathlib.Path(tempfile.mkdtemp(prefix="s18_grade_"))
-    base = workspace.resolve()
+    report = None
+    try:
+        base = workspace.resolve()
 
-    def normalised(rel: str) -> tuple[str, pathlib.Path]:
-        src = (base / rel).resolve()
+        def normalised(rel: str) -> tuple[str, pathlib.Path]:
+            src = (base / rel).resolve()
+            try:
+                name = src.relative_to(base).as_posix()
+            except ValueError as e:
+                raise ValueError(f"task path leaves workspace: {rel}") from e
+            return name, src
+
+        canonical = {normalised(rel)[0]: body for rel, body in task["files"].items()}
+        writable = dict(normalised(rel) for rel in writable_paths(task))
+
+        # Found 2026-08-23: copying every file the agent created reopens pytest.py,
+        # while copying only task["files"] drops honest declared helper modules.
+        # The shared positive list is the boundary; canonical text wins everywhere
+        # outside it because the loop could not legally have changed those files.
+        for rel in dict.fromkeys((*canonical, *writable)):
+            dst = room / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if rel in writable:
+                src = writable[rel]
+                dst.write_text(src.read_text() if src.is_file() else "")
+            else:
+                dst.write_text(canonical[rel])
+        for rel, body in task["tests"].items():    # canonical, from the task file
+            dst = room / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(body)
+        report = _run_and_report(room)
+        return report
+    finally:
+        # Found 2026-08-23: every final grade and in-loop test leaked an
+        # s18_grade_* directory. This room is derived and contains no unique
+        # evidence. Cleanup is best-effort so an OSError cannot replace either
+        # a completed grading report or the original copy/pytest exception.
         try:
-            name = src.relative_to(base).as_posix()
-        except ValueError as e:
-            raise ValueError(f"task path leaves workspace: {rel}") from e
-        return name, src
-
-    canonical = {normalised(rel)[0]: body for rel, body in task["files"].items()}
-    writable = dict(normalised(rel) for rel in writable_paths(task))
-
-    # Found 2026-08-23: copying every file the agent created reopens pytest.py,
-    # while copying only task["files"] drops honest declared helper modules.
-    # The shared positive list is the boundary; canonical text wins everywhere
-    # outside it because the loop could not legally have changed those files.
-    for rel in dict.fromkeys((*canonical, *writable)):
-        dst = room / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if rel in writable:
-            src = writable[rel]
-            dst.write_text(src.read_text() if src.is_file() else "")
-        else:
-            dst.write_text(canonical[rel])
-    for rel, body in task["tests"].items():        # canonical, from the task file
-        dst = room / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(body)
-    report = _run_and_report(room)
-    report["room"] = str(room)
-    return report
+            shutil.rmtree(room)
+        except OSError as e:
+            if report is not None:
+                report["cleanup_error"] = f"{type(e).__name__}: {e}"[:500]
 
 
 def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:

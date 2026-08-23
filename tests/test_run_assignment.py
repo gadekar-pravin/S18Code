@@ -10,6 +10,8 @@ import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
+import pytest
+
 from S18Code.harnesses.base import Step, TaskRun
 from S18Code import run_assignment as runner
 
@@ -316,3 +318,66 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     assert (out / "runs" /
             "t10_source_repair_average__s17_rules__r0.ABORTED.json").is_file()
     assert "ABORTED OSError (journalled; not a result)" in capsys.readouterr().out
+
+
+def test_startup_replaces_stale_derived_results_before_any_cell(
+        tmp_path, monkeypatch, capsys):
+    """Found 2026-08-23: runs/ recovery left the old results table behind."""
+    out = tmp_path / "assignment"
+    (out / "runs").mkdir(parents=True)
+    (out / "results.json").write_text(json.dumps(
+        {"manifest": {"old": True}, "rows": [{"task": "stale"}]}) + "\n")
+    monkeypatch.setattr(runner, "OUT", out)
+    monkeypatch.setattr(runner, "preflight", lambda: "pytest test-version")
+    monkeypatch.setattr(runner, "_git_provenance", lambda: {
+        "git_commit": "abc123", "git_dirty": False, "git_error": None})
+    monkeypatch.setenv("S18_REPEATS", "0")
+    monkeypatch.setattr(sys, "argv", ["run_assignment.py",
+                                      "t10_source_repair_average"])
+
+    asyncio.run(runner.main())
+
+    written = json.loads((out / "results.json").read_text())
+    output = capsys.readouterr().out
+    assert (written["rows"], written["manifest"]["tasks"],
+            "wrote" in output, "(0/0 cells, 0 results)" in output) == (
+                [], ["t10_source_repair_average"], True, True)
+
+
+def test_duplicate_task_ids_are_rejected_before_the_grid_starts(
+        tmp_path, monkeypatch):
+    """Found 2026-08-23: duplicate cells overwrite the same journal name."""
+    monkeypatch.setattr(runner, "OUT", tmp_path / "assignment")
+    monkeypatch.setattr(runner, "preflight", lambda: "pytest test-version")
+    monkeypatch.setenv("S18_REPEATS", "0")
+    monkeypatch.setattr(sys, "argv", ["run_assignment.py",
+                                      "t10_source_repair_average",
+                                      "t10_source_repair_average"])
+
+    with pytest.raises(
+            SystemExit,
+            match=r"duplicate task ids: \['t10_source_repair_average'\]"):
+        asyncio.run(runner.main())
+
+
+def test_git_provenance_is_explicit_when_present_or_unavailable(monkeypatch):
+    """Found 2026-08-23: a harness filename did not identify its code."""
+    replies = iter([
+        subprocess.CompletedProcess([], 0, stdout="d8a5c90\n", stderr=""),
+        subprocess.CompletedProcess([], 0, stdout=" M run_assignment.py\n", stderr=""),
+    ])
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: next(replies))
+    present = runner._git_provenance()
+    monkeypatch.setattr(
+        runner.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git missing")))
+    missing = runner._git_provenance()
+    monkeypatch.setattr(runner, "_git_provenance", lambda: present)
+    manifest = runner.freeze_manifest({}, "pytest test-version")
+
+    assert (present, missing,
+            {key: manifest[key] for key in present}) == (
+        {"git_commit": "d8a5c90", "git_dirty": True, "git_error": None},
+        {"git_commit": None, "git_dirty": None,
+         "git_error": "FileNotFoundError: git missing"},
+        {"git_commit": "d8a5c90", "git_dirty": True, "git_error": None})

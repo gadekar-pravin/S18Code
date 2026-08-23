@@ -13,6 +13,7 @@ Run from the repository root, with pytest importable by the active python3:
 reach touches this file.)
 """
 import json
+import importlib
 import os
 import pathlib
 import sys
@@ -24,6 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import pytest
 
 from S18Code.harnesses.loop import PROTECTED, _protected
+grader_module = importlib.import_module("S18Code.tasks.materialise")
 from S18Code.tasks.materialise import (derive_status, grade_clean_room,
                                        grade_report, materialise,
                                        run_tests, sanitized_env, writable_paths)
@@ -364,6 +366,76 @@ def test_the_boolean_wrapper_agrees_with_the_report():
         task = _t(src)
         ws = materialise(task)
         assert grade_clean_room(ws, task)[0] is grade_report(ws, task)["all_passed"]
+
+
+def test_grade_report_removes_its_room_and_drops_the_dead_path(
+        tmp_path, monkeypatch):
+    """Found 2026-08-23: every grading invocation leaked s18_grade_*."""
+    room = tmp_path / "s18_grade_test"
+    task = _t("def f():\n    return 1\n")
+    ws = materialise(task)
+
+    def make_room(prefix):
+        room.mkdir()
+        return str(room)
+
+    monkeypatch.setattr(grader_module.tempfile, "mkdtemp", make_room)
+    monkeypatch.setattr(grader_module, "_run_and_report",
+                        lambda path: {"all_passed": True, "tail": "passed"})
+    report = grade_report(ws, task)
+    assert ("room" not in report, room.exists()) == (True, False)
+
+
+@pytest.mark.parametrize("stage", ["copy", "pytest"])
+def test_grade_report_cleans_the_room_when_grading_raises(
+        tmp_path, monkeypatch, stage):
+    """Found 2026-08-23: finally must cover copying and the pytest phase."""
+    room = tmp_path / "s18_grade_failure"
+    task = _t("def f():\n    return 1\n")
+    ws = materialise(task)
+
+    def make_room(prefix):
+        room.mkdir()
+        return str(room)
+
+    monkeypatch.setattr(grader_module.tempfile, "mkdtemp", make_room)
+    if stage == "copy":
+        task["files"] = {"../escape.py": "x = 1\n"}
+        expected = ("ValueError", "task path leaves workspace: ../escape.py")
+    else:
+        monkeypatch.setattr(
+            grader_module, "_run_and_report",
+            lambda path: (_ for _ in ()).throw(RuntimeError("pytest broke")))
+        expected = ("RuntimeError", "pytest broke")
+    try:
+        grade_report(ws, task)
+    except Exception as e:
+        observed = (type(e).__name__, str(e))
+    else:
+        observed = None
+    assert (observed, room.exists()) == (expected, False)
+
+
+def test_cleanup_error_does_not_replace_a_completed_grading_report(
+        tmp_path, monkeypatch):
+    """Found 2026-08-23: cleanup cannot replace the grading result."""
+    room = tmp_path / "s18_grade_cleanup_error"
+    task = _t("def f():\n    return 99\n")
+    ws = materialise(task)
+
+    def make_room(prefix):
+        room.mkdir()
+        return str(room)
+
+    monkeypatch.setattr(grader_module.tempfile, "mkdtemp", make_room)
+    monkeypatch.setattr(grader_module, "_run_and_report",
+                        lambda path: {"all_passed": False, "tail": "failed"})
+    monkeypatch.setattr(
+        grader_module.shutil, "rmtree",
+        lambda path: (_ for _ in ()).throw(OSError("cleanup blocked")))
+    report = grade_report(ws, task)
+    assert (report["all_passed"], report["tail"], report["cleanup_error"]) == (
+        False, "failed", "OSError: cleanup blocked")
 
 
 # The clauses no end-to-end run can reach. pytest exits 5 when it collects

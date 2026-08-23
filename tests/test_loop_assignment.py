@@ -176,6 +176,54 @@ def test_write_through_the_fence_reaches_disk(ws):
     assert run.ended == "done" and run.claimed_success is True
 
 
+def test_string_false_success_is_unusable_instead_of_truthy(ws):
+    """Found 2026-08-23: bool("false") recorded an explicit failure as True."""
+    prompts = []
+    replies = iter(['{"action":"done","success":"false","note":"n"}',
+                    '{"action":"done","success":false,"note":"n"}'])
+
+    async def llm(prompt, system):
+        prompts.append(json.loads(prompt))
+        return next(replies)
+
+    run = asyncio.run(_run(llm, ws))
+    corrective_history = (prompts[1]["history"][-1]
+                          if len(prompts) > 1 else None)
+    assert (run.calls, run.unusable_replies, run.ended, run.claimed_success,
+            [s.kind for s in run.steps], corrective_history) == (
+                2, 1, "done", False, ["answer"],
+                "done success must be a JSON boolean")
+
+
+def test_absent_success_keeps_the_fail_safe_false_claim(ws):
+    """Missing is not success and retains the pre-2026-08-23 behaviour."""
+    run = asyncio.run(_run(
+        _scripted('{"action":"done","note":"no explicit claim"}'), ws))
+    assert (run.ended, run.claimed_success, run.unusable_replies,
+            [s.kind for s in run.steps]) == ("done", False, 0, ["answer"])
+
+
+@pytest.mark.parametrize("action,path", [("read", 1), ("write", ["calc.py"])])
+def test_non_string_paths_are_unusable_replies_not_cell_aborts(ws, action, path):
+    """Found 2026-08-23: pathlib/_protected raised on malformed path types."""
+    prompts = []
+    malformed = {"action": action, "path": path}
+    if action == "write":
+        malformed["content"] = ""
+    replies = iter([json.dumps(malformed),
+                    '{"action":"done","success":false,"note":"n"}'])
+
+    async def llm(prompt, system):
+        prompts.append(json.loads(prompt))
+        return next(replies)
+
+    run = asyncio.run(_run(llm, ws))
+    assert (run.calls, run.unusable_replies, run.ended,
+            [s.kind for s in run.steps], prompts[1]["history"][-1]) == (
+                2, 1, "done", ["answer"],
+                f"{action} path must be a JSON string")
+
+
 def test_task_without_writable_keeps_legacy_source_contract(ws):
     task = _task()
     assert writable_paths(task) == ("calc.py",)
