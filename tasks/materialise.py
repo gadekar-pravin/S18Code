@@ -35,6 +35,11 @@ def sanitized_env() -> dict[str, str]:
     return env
 
 
+def writable_paths(task: dict) -> tuple[str, ...]:
+    """The task's write contract, with the legacy source list as the default."""
+    return tuple(task.get("writable", task["files"]))
+
+
 def materialise(task: dict, root: str | None = None) -> pathlib.Path:
     d = pathlib.Path(root or tempfile.mkdtemp(prefix="s18_"))
     if d.exists() and root is None:
@@ -79,7 +84,7 @@ def run_tests(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
 
 
 def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
-    """Grade in a fresh directory holding only canonical tests and declared sources.
+    """Grade in a fresh directory holding only canonical tests and allowed sources.
 
     Added 2026-08-22, found reviewing PR #2. run_tests restores the named test
     files and then runs pytest IN THE AGENT'S WORKSPACE, so every other file the
@@ -95,9 +100,13 @@ def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
         pytest.ini, .pth, plugins, ...
 
     Copying forward only what the task declares closes all of them at once, and
-    closes the ones nobody has thought of yet. Nothing is copied out of the
-    workspace except the files named in task["files"]; anything else the agent
-    created simply does not exist here.
+    closes the ones nobody has thought of yet. As of 2026-08-23 the declaration
+    is the same writable_paths() contract enforced by loop_assignment.py. The
+    room contains the union of task["files"] and that contract: writable files
+    come from the agent workspace, while declared but non-writable files come
+    from the task's canonical body. Anything else the agent created simply does
+    not exist here. This closes the false-success mismatch where in-loop pytest
+    imported an undeclared helper that the final grader did not copy.
 
     Note there is no -I here. Isolated mode also drops the cwd from sys.path,
     which is where the module under test lives, so `from calc import average`
@@ -111,11 +120,31 @@ def grade_clean_room(workspace: pathlib.Path, task: dict) -> tuple[bool, str]:
     and changing it would silently restate what that grid measured.
     """
     room = pathlib.Path(tempfile.mkdtemp(prefix="s18_grade_"))
-    for rel in task["files"]:                      # only the declared sources
-        src = workspace / rel
+    base = workspace.resolve()
+
+    def normalised(rel: str) -> tuple[str, pathlib.Path]:
+        src = (base / rel).resolve()
+        try:
+            name = src.relative_to(base).as_posix()
+        except ValueError as e:
+            raise ValueError(f"task path leaves workspace: {rel}") from e
+        return name, src
+
+    canonical = {normalised(rel)[0]: body for rel, body in task["files"].items()}
+    writable = dict(normalised(rel) for rel in writable_paths(task))
+
+    # Found 2026-08-23: copying every file the agent created reopens pytest.py,
+    # while copying only task["files"] drops honest declared helper modules.
+    # The shared positive list is the boundary; canonical text wins everywhere
+    # outside it because the loop could not legally have changed those files.
+    for rel in dict.fromkeys((*canonical, *writable)):
         dst = room / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(src.read_text() if src.is_file() else "")
+        if rel in writable:
+            src = writable[rel]
+            dst.write_text(src.read_text() if src.is_file() else "")
+        else:
+            dst.write_text(canonical[rel])
     for rel, body in task["tests"].items():        # canonical, from the task file
         dst = room / rel
         dst.parent.mkdir(parents=True, exist_ok=True)

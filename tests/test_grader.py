@@ -170,3 +170,31 @@ def test_the_grader_never_sees_the_salt_even_if_the_parent_has_it(monkeypatch):
     passed, tail = grade_clean_room(materialise(T08), T08)
     assert passed is False
     assert_real_failure(tail, "S18_SECRET_SALT")
+
+
+# ------------------------------------------------ shared writable contract
+
+def test_clean_room_copies_a_declared_writable_helper():
+    task = {
+        "id": "t_helper",
+        "files": {"calc.py": "from helper import value\n"},
+        "writable": ["calc.py", "helper.py"],
+        "tests": {"tests/test_calc.py": "import calc\ndef test_value(): assert calc.value == 7\n"},
+    }
+    ws = materialise(task)
+    (ws / "helper.py").write_text("value = 7\n")
+    passed, tail = grade_clean_room(ws, task)
+    assert passed is True, tail
+
+
+def test_clean_room_restores_declared_non_writable_source():
+    task = {
+        "id": "t_canonical",
+        "files": {"calc.py": "from locked import value\n", "locked.py": "value = 7\n"},
+        "writable": ["calc.py"],
+        "tests": {"tests/test_calc.py": "import calc\ndef test_value(): assert calc.value == 7\n"},
+    }
+    ws = materialise(task)
+    (ws / "locked.py").write_text("value = 99\n")
+    passed, tail = grade_clean_room(ws, task)
+    assert passed is True, tail

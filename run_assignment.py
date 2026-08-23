@@ -66,10 +66,6 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-if not KEY:
-    raise SystemExit(
-        "set OPENROUTER_API_KEY before running this.\n"
-        "  export OPENROUTER_API_KEY=...      (or put it in .env, which is gitignored)")
 
 # Real token counts, one entry per model call, harvested from OpenRouter's usage
 # object. Kept out of TaskRun on purpose: widening the llm() signature would
@@ -78,9 +74,16 @@ if not KEY:
 # cannot see the reasoning channel at all, so on a reasoning model it is not
 # merely imprecise, it is measuring the wrong thing.
 USAGE: list[dict] = []
+# Provider retries are not model turns. Found 2026-08-23: TaskRun.calls counts
+# loop turns attempted, so incrementing it here would change the historical
+# scorer contract. These counters sit beside raw provider usage instead and are
+# reset for each cell.
+PROVIDER_REQUESTS = 0
+PROVIDER_RETRIES = 0
 
 
 async def llm(prompt, system):
+    global PROVIDER_REQUESTS, PROVIDER_RETRIES
     body = json.dumps({
         "model": MODEL,
         "messages": [{"role": "system", "content": system},
@@ -96,6 +99,11 @@ async def llm(prompt, system):
     })
     last = None
     for attempt in range(3):
+        # Count before I/O so timeouts and HTTP failures are included. A retry
+        # is every issued request after the first request in this model turn.
+        PROVIDER_REQUESTS += 1
+        if attempt:
+            PROVIDER_RETRIES += 1
         try:
             with urllib.request.urlopen(req, timeout=600) as r:
                 d = json.load(r)
@@ -113,6 +121,12 @@ async def llm(prompt, system):
             # Status only. The body can echo request material and the header
             # carries the key; neither belongs in a journal or a terminal.
             last = f"HTTP {e.code}"
+            # Found 2026-08-23: permanent client errors burned all three
+            # requests plus 15 seconds of backoff. 429 is transient; other 4xx
+            # responses are not retried. The 3-attempt and 5s/10s schedule for
+            # 429 and 5xx stays unchanged.
+            if 400 <= e.code < 500 and e.code != 429:
+                raise RuntimeError(f"openrouter unavailable: {last}") from None
         except Exception as e:
             last = type(e).__name__
         if attempt < 2:
@@ -128,6 +142,11 @@ def preflight():
     indistinguishable from model failure. That is an unactivated venv, and it
     has cost a full grid before.
     """
+    if not KEY:
+        raise SystemExit(
+            "set OPENROUTER_API_KEY before running this.\n"
+            "  export OPENROUTER_API_KEY=...      (or put it in .env, which is gitignored)")
+
     r = subprocess.run(["python3", "-m", "pytest", "--version"],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -186,6 +205,7 @@ def freeze_manifest(tasks: dict, pytest_version: str) -> dict:
 
 
 async def main():
+    global PROVIDER_REQUESTS, PROVIDER_RETRIES
     pytest_version = preflight()
     T = pathlib.Path(__file__).parent / "tasks"
     all_tasks = {json.loads(p.read_text())["id"]: json.loads(p.read_text())
@@ -229,6 +249,8 @@ async def main():
             n += 1
             ws = materialise(t)
             USAGE.clear()
+            PROVIDER_REQUESTS = 0
+            PROVIDER_RETRIES = 0
             t0 = time.time()
             try:
                 run = await run_loop(t, ws, ARM, llm, MODEL)
@@ -245,27 +267,73 @@ async def main():
                                 "aborted": True,
                                 "exception": type(e).__name__, "detail": str(e)[:500],
                                 "seconds": time.time() - t0,
-                                "usage": list(USAGE)}, indent=1) + "\n")
+                                "usage": list(USAGE),
+                                "provider_requests": PROVIDER_REQUESTS,
+                                "provider_retries": PROVIDER_RETRIES}, indent=1) + "\n")
                 print(f"  [{n}/{total}] {tid} ABORTED {type(e).__name__} "
                       f"(journalled)", flush=True)
                 continue
             # Clean room, not run_tests: the agent's workspace can hold a
             # pytest.py that grades everything green. See grade_clean_room.
-            passed, tail = grade_clean_room(ws, t)
+            grading_error = None
+            try:
+                passed, tail = grade_clean_room(ws, t)
+            except Exception as e:
+                # Found 2026-08-23: this used to sit outside every try. A final
+                # pytest timeout discarded the completed, provider-billed run
+                # and stopped the rest of the grid. Unlike ABORTED above, run
+                # exists here and its complete evidence must be preserved.
+                passed, tail = None, None
+                grading_error = {"exception": type(e).__name__,
+                                 "detail": str(e)[:500]}
 
             # Journal FIRST. score() is pure and cannot contaminate this, but a
             # scorer that raises must not also destroy the evidence needed to
             # fix it.
-            (runs_dir / f"{tid}__{ARM.name}__r{rep}.json").write_text(json.dumps(
-                {**dataclasses.asdict(run), "actually_passed": passed,
-                 "pytest_tail": tail, "kind": t["kind"], "rep": rep,
-                 "usage": list(USAGE),
-                 "final_files": {f.name: f.read_text()[:4000]
-                                 for f in sorted(ws.glob("*.py"))}}, indent=1) + "\n")
+            journal = {**dataclasses.asdict(run), "actually_passed": passed,
+                       "pytest_tail": tail, "kind": t["kind"], "rep": rep,
+                       "usage": list(USAGE),
+                       "provider_requests": PROVIDER_REQUESTS,
+                       "provider_retries": PROVIDER_RETRIES,
+                       "final_files": {f.name: f.read_text()[:4000]
+                                       for f in sorted(ws.glob("*.py"))}}
+            if grading_error is not None:
+                journal["grading_error"] = grading_error
+            (runs_dir / f"{tid}__{ARM.name}__r{rep}.json").write_text(
+                json.dumps(journal, indent=1) + "\n")
+
+            if grading_error is not None:
+                # Keep one visible row per manifest cell, but flag this as an
+                # infrastructure non-result with solved:null. Omitting it would
+                # make a complete N-cell manifest look like an N-cell result set
+                # while silently shortening the table.
+                row = {"task": run.task_id, "harness": run.harness,
+                       "kind": t["kind"], "rep": rep,
+                       "not_a_result": True, "result_status": "grader_error",
+                       "solved": None, "claimed": run.claimed_success,
+                       "ended": run.ended, "steps": len(run.steps),
+                       "calls": run.calls,
+                       "provider_requests": PROVIDER_REQUESTS,
+                       "provider_retries": PROVIDER_RETRIES,
+                       "grader_exception": grading_error["exception"],
+                       "grader_detail": grading_error["detail"],
+                       "usage_total_tokens": sum(
+                           u.get("total_tokens", 0) for u in USAGE)}
+                rows.append(row)
+                (OUT / "results.json").write_text(json.dumps(
+                    {"manifest": manifest, "rows": rows}, indent=1) + "\n")
+                print(f"  [{n}/{total}] {tid:30s} r{rep} GRADER_ERROR "
+                      f"{grading_error['exception']} (run journalled; not a result)",
+                      flush=True)
+                if n < total:
+                    await asyncio.sleep(COOLDOWN)
+                continue
 
             row = score(run, actually_passed=passed)
             row["kind"], row["claimed"], row["rep"] = t["kind"], run.claimed_success, rep
             row["usage_total_tokens"] = sum(u.get("total_tokens", 0) for u in USAGE)
+            row["provider_requests"] = PROVIDER_REQUESTS
+            row["provider_retries"] = PROVIDER_RETRIES
             rows.append(row)
             (OUT / "results.json").write_text(json.dumps(
                 {"manifest": manifest, "rows": rows}, indent=1) + "\n")
@@ -277,8 +345,11 @@ async def main():
             if n < total:
                 await asyncio.sleep(COOLDOWN)
 
-    print(f"\n  wrote {OUT / 'results.json'}  ({len(rows)}/{total} rows)")
+    results = sum(not row.get("not_a_result", False) for row in rows)
+    print(f"\n  wrote {OUT / 'results.json'}  "
+          f"({len(rows)}/{total} cells, {results} results)")
     print(f"  journals in {runs_dir}")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

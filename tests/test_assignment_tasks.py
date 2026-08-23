@@ -222,6 +222,13 @@ def test_every_card_carries_what_the_rubric_asks_for(tid):
     assert card["behavior"].count(".") == 1, "behavior must be exactly one sentence"
 
 
+def test_top_level_and_card_writable_contracts_agree():
+    for path in TASKS_DIR.glob("t*.json"):
+        task = json.loads(path.read_text())
+        if "writable" in task and "writable" in task.get("card", {}):
+            assert task["writable"] == task["card"]["writable"], task["id"]
+
+
 def test_only_t12_claims_impossibility():
     """t11 claimed it on 2026-08-22 and was wrong. The claim is gone, and this
     asserts it stays gone rather than trusting a comment."""

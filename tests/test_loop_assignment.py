@@ -29,6 +29,7 @@ import pytest
 from S18Code.evals.axes import PROTECTED as SCORER_PROTECTED
 from S18Code.harnesses import loop as base_loop
 from S18Code.harnesses import loop_assignment as asg
+from S18Code.tasks.materialise import grade_clean_room, writable_paths
 
 
 def test_protected_is_the_same_object_not_a_third_copy():
@@ -149,10 +150,10 @@ def ws(tmp_path):
     return tmp_path
 
 
-async def _run(llm, ws, **kw):
+async def _run(llm, ws, task=None, **kw):
     cfg = asg.Config("assignment", guard=kw.pop("guard", True),
                      ceiling=kw.pop("ceiling", 4), **kw)
-    return await asg.run_loop(_task(), ws, cfg, llm, "test-model")
+    return await asg.run_loop(task or _task(), ws, cfg, llm, "test-model")
 
 
 def test_run_loop_uses_the_assignment_system_prompt(ws):
@@ -170,6 +171,44 @@ def test_write_through_the_fence_reaches_disk(ws):
     assert (ws / "calc.py").read_text() == "x = 2\n"
     assert [s.kind for s in run.steps] == ["edit", "answer"]
     assert run.ended == "done" and run.claimed_success is True
+
+
+def test_task_without_writable_keeps_legacy_source_contract(ws):
+    task = _task()
+    assert writable_paths(task) == ("calc.py",)
+    llm = _scripted('{"action":"write","path":"./calc.py"}\n```python\nx = 3\n```',
+                    '{"action":"done","success":true,"note":"n"}')
+    run = asyncio.run(_run(llm, ws, task=task))
+    assert (ws / "calc.py").read_text() == "x = 3\n"
+    assert run.steps[0].kind == "edit" and run.steps[0].target == "./calc.py"
+
+
+def test_undeclared_helper_is_refused_at_write_time(ws):
+    task = {**_task(), "writable": ["calc.py"]}
+    llm = _scripted('{"action":"write","path":"helper.py"}\n```python\nx = 2\n```',
+                    '{"action":"done","success":false,"note":"n"}')
+    run = asyncio.run(_run(llm, ws, task=task))
+    assert not (ws / "helper.py").exists()
+    assert run.steps[0].kind == "refused"
+    assert run.steps[0].detail == "not a declared writable file"
+
+
+def test_declared_single_file_repair_still_writes_and_grades_true(tmp_path):
+    task = {"id": "t_average", "prompt": "fix it",
+            "files": {"calc.py": "def average(xs):\n    return sum(xs) / len(xs)\n"},
+            "writable": ["calc.py"],
+            "tests": {"tests/test_calc.py":
+                      "from calc import average\ndef test_empty(): assert average([]) == 0\n"}}
+    ws = tmp_path
+    (ws / "calc.py").write_text(task["files"]["calc.py"])
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_calc.py").write_text(task["tests"]["tests/test_calc.py"])
+    llm = _scripted('{"action":"write","path":"sub/../calc.py"}\n```python\n'
+                    'def average(xs):\n    return sum(xs) / len(xs) if xs else 0\n```',
+                    '{"action":"done","success":true,"note":"fixed"}')
+    run = asyncio.run(_run(llm, ws, task=task))
+    assert run.steps[0].kind == "edit"
+    assert grade_clean_room(ws, task)[0] is True
 
 
 def test_guard_refuses_a_protected_write_and_records_it(ws):
