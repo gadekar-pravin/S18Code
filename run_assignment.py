@@ -6,7 +6,7 @@ literal into every row it derives. An ox-alpha run written into proofs/runs/
 would be relabelled as qwen on the next rescore with no error raised, so this
 runner writes to proofs/assignment_v1/ and never touches the published evidence.
 
-Three differences from run_local.py, all deliberate:
+Four differences from run_local.py, all deliberate:
 
   one arm       the assignment asks for one fixed configuration, not an A/B.
                 guard=True, ceiling=4 - the s17_rules settings.
@@ -15,6 +15,14 @@ Three differences from run_local.py, all deliberate:
                 pure, so ordering cannot contaminate it, but if score() raises
                 then a run written afterwards is lost - which is the exact
                 six-hours-of-GPU disaster the journal exists to prevent.
+  importable    run_local.py and run_benchmark.py both end with a bare
+                asyncio.run(main()); this one guards it behind __main__ and
+                loads .env inside preflight() rather than at import, so the
+                grader-failure path can be tested without launching a billed
+                grid. The divergence from its two siblings is paid knowingly:
+                this is the only runner whose re-run is not regenerable. The
+                others cost GPU hours; this one costs evidence from a hosted
+                model that can be withdrawn without notice.
 
 Reasoning is left ON, as in run_local.py: noticing that it has failed is the
 axis under test, and a model that cannot reason cannot notice. Reasoning tokens
@@ -47,13 +55,21 @@ COOLDOWN = 2                # hosted model; politeness, not thermal management
 
 OUT = pathlib.Path(__file__).parent / "proofs" / "assignment_v1"
 
-def _load_dotenv() -> None:
+def _api_key() -> str:
+    """The provider key, read at call time so nothing is bound at import."""
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+
+def _load_dotenv(path: pathlib.Path | None = None) -> None:
     """Read .env if present. Real environment always wins over the file.
 
     No dependency: this repo has no manifest and is not going to grow one for
     six lines. Values are never printed, and .env / .env.* are gitignored.
+
+    `path` exists so a test can prove the loader still works without reading the
+    real .env or writing to its fixed location. Production callers pass nothing.
     """
-    f = pathlib.Path(__file__).parent / ".env"
+    f = path or pathlib.Path(__file__).parent / ".env"
     if not f.exists():
         return
     for line in f.read_text().splitlines():
@@ -64,8 +80,20 @@ def _load_dotenv() -> None:
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-_load_dotenv()
-KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+# NOTE: _load_dotenv() is deliberately NOT called here, and no key is bound at
+# import. Added 2026-08-23. Making this module importable so the grader-failure
+# path could be tested meant `import S18Code.run_assignment` ran the loader, and
+# tests/test_run_assignment.py imports it at collection - so every pytest run
+# pulled OPENROUTER_API_KEY and both GEMINI keys into the test process before a
+# single test executed. Measured: three names added to os.environ. That is the
+# same defect class as the one _ENV_ALLOWLIST closed one layer down, arriving
+# through the door that testability opened.
+#
+# It also makes the test suite fail-closed. The runner tests patch run_loop; if
+# that patch ever stops applying, llm() now finds no key and the run records
+# ended="llm_error" instead of billing a real call to a hosted model from inside
+# pytest. preflight() is the single place that loads .env, and main() calls it
+# first, so a real grid is unaffected.
 
 # Real token counts, one entry per model call, harvested from OpenRouter's usage
 # object. Kept out of TaskRun on purpose: widening the llm() signature would
@@ -93,7 +121,7 @@ async def llm(prompt, system):
         "reasoning": {"enabled": REASONING},
     }).encode()
     req = urllib.request.Request(ENDPOINT, data=body, headers={
-        "Authorization": f"Bearer {KEY}",
+        "Authorization": f"Bearer {_api_key()}",
         "Content-Type": "application/json",
         "X-Title": "S18Code assignment grid",
     })
@@ -142,7 +170,8 @@ def preflight():
     indistinguishable from model failure. That is an unactivated venv, and it
     has cost a full grid before.
     """
-    if not KEY:
+    _load_dotenv()          # here, not at import - see the note above USAGE
+    if not _api_key():
         raise SystemExit(
             "set OPENROUTER_API_KEY before running this.\n"
             "  export OPENROUTER_API_KEY=...      (or put it in .env, which is gitignored)")

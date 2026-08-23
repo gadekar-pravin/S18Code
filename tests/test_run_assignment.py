@@ -1,6 +1,8 @@
 """Runner-level regression tests for assignment journal durability and cost."""
 import asyncio
+import importlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -42,6 +44,24 @@ def test_grader_timeout_preserves_run_and_continues_grid(tmp_path, monkeypatch, 
             raise subprocess.TimeoutExpired(["python3", "-m", "pytest"], 120)
         return False, "assertion failed"
 
+    class _ReachedTheProvider(BaseException):
+        """Deliberately not an Exception.
+
+        run_loop wraps its llm call in `except Exception`, which converts any
+        failure into ended="llm_error" and swallows the message - so an
+        AssertionError here produced an unrelated dict mismatch instead of
+        saying what went wrong. Verified 2026-08-23 by dropping the run_loop
+        patch. BaseException escapes that handler.
+        """
+
+    def _explode(prompt, system):
+        # The test's own safety property, made mutation-checkable. main() is
+        # patched at run_loop, so the real llm must never be reached; if a later
+        # refactor makes that patch stop applying, this goes red instead of
+        # billing a call to a hosted model from inside pytest.
+        raise _ReachedTheProvider("test reached the real model path")
+
+    monkeypatch.setattr(runner, "llm", _explode)
     monkeypatch.setattr(runner, "run_loop", fake_run_loop)
     monkeypatch.setattr(runner, "grade_clean_room", fake_grade)
 
@@ -156,3 +176,54 @@ def test_permanent_http_error_is_not_retried(monkeypatch):
 
     assert (attempts, runner.PROVIDER_REQUESTS, runner.PROVIDER_RETRIES,
             sleeps, error) == (1, 1, 0, [], "openrouter unavailable: HTTP 401")
+
+
+def test_importing_the_runner_binds_no_key_and_touches_no_environment():
+    """Importing this module must have no effect on os.environ.
+
+    Added 2026-08-23. Making the module importable - which is what let the
+    grader-failure path above be tested at all - meant `import
+    S18Code.run_assignment` ran _load_dotenv(), and this file imports it at
+    collection. Measured before the fix: three names (OPENROUTER_API_KEY,
+    GEMINI_API_KEY_1, GEMINI_API_KEY_2) were added to os.environ of the pytest
+    process before a single test ran, conditional on a gitignored file that
+    exists only on the author's machine. That is the defect class
+    _ENV_ALLOWLIST closed one layer down, re-entering through the door
+    testability opened.
+
+    The `KEY` half is what makes the suite fail-closed: with no key bound at
+    import, an llm() that is reached by mistake finds nothing and the run
+    records ended="llm_error" rather than billing a real call.
+    """
+    assert not hasattr(runner, "KEY"), (
+        "a module-level key binding is back; llm() must read it at call time")
+
+    before = set(os.environ)
+    importlib.reload(runner)
+    added = sorted(set(os.environ) - before)
+    assert added == [], f"import added {added} to os.environ"
+
+
+def test_the_dotenv_loader_still_works_where_it_is_supposed_to(tmp_path, monkeypatch):
+    """The other half: proving the load moved, not that it disappeared.
+
+    Without this, the test above is satisfied by deleting _load_dotenv outright,
+    which would break every real run.
+    """
+    monkeypatch.delenv("S18_FAKE_DOTENV_NAME", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text('S18_FAKE_DOTENV_NAME="from-the-file"\n')
+
+    runner._load_dotenv(env_file)
+    assert os.environ["S18_FAKE_DOTENV_NAME"] == "from-the-file"
+    monkeypatch.delenv("S18_FAKE_DOTENV_NAME", raising=False)
+
+
+def test_preflight_is_the_thing_that_loads_dotenv(monkeypatch):
+    """preflight() must call the loader, or a real grid finds no key."""
+    called = []
+    monkeypatch.setattr(runner, "_load_dotenv", lambda *a: called.append(True))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-NOT-REAL")
+    monkeypatch.delenv("S18_SECRET_SALT", raising=False)
+    runner.preflight()
+    assert called == [True], "preflight() no longer loads .env"
