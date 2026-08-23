@@ -32,7 +32,7 @@ count against max_tokens, hence 16000 rather than run_local.py's 1200.
     cd .. && python3 -m S18Code.run_assignment
     cd .. && python3 -m S18Code.run_assignment t01_average_empty
 """
-import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.request
+import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from S18Code.harnesses.loop import Config
@@ -66,6 +66,41 @@ COOLDOWN = 2                # hosted model; politeness, not thermal management
 # a reader has to assume.
 OUT = pathlib.Path(os.getenv(
     "S18_OUT", str(pathlib.Path(__file__).parent / "proofs" / "assignment_v1")))
+
+
+def _atomic_write_journal(path: pathlib.Path, record: dict) -> None:
+    """Publish one irreplaceable provider journal without a partial final file.
+
+    Found 2026-08-23: direct write_text() could leave a truncated .json after an
+    interruption, and the no-clobber guard then preserved that fragment while
+    refusing to rerun the hosted reply it had failed to preserve. Serialise
+    before creating a same-directory temporary file, flush and fsync it, then
+    atomically replace the final path. A failed publication leaves no final
+    journal for the no-clobber guard to mistake for evidence.
+
+    This is deliberately only for normal and ABORTED records under runs/: they
+    contain non-reproducible hosted replies. Manifest and results.json remain
+    direct writes because they are derived/reconstructable; atomic publication
+    there is not needed to preserve the irreplaceable record.
+    """
+    text = json.dumps(record, indent=1) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = pathlib.Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _grading_timeout_report(error: subprocess.TimeoutExpired) -> dict:
@@ -368,14 +403,15 @@ async def main():
                 # and left a runs/ directory silently short of the manifest's
                 # count. An abort is a fact about the harness and gets a record.
                 # Caught in review by Codex.
-                (runs_dir / f"{tid}__{ARM.name}__r{rep}.ABORTED.json").write_text(
-                    json.dumps({"task_id": tid, "arm": ARM.name, "rep": rep,
-                                "aborted": True,
-                                "exception": type(e).__name__, "detail": str(e)[:500],
-                                "seconds": time.time() - t0,
-                                "usage": list(USAGE),
-                                "provider_requests": PROVIDER_REQUESTS,
-                                "provider_retries": PROVIDER_RETRIES}, indent=1) + "\n")
+                _atomic_write_journal(
+                    runs_dir / f"{tid}__{ARM.name}__r{rep}.ABORTED.json",
+                    {"task_id": tid, "arm": ARM.name, "rep": rep,
+                     "aborted": True,
+                     "exception": type(e).__name__, "detail": str(e)[:500],
+                     "seconds": time.time() - t0,
+                     "usage": list(USAGE),
+                     "provider_requests": PROVIDER_REQUESTS,
+                     "provider_retries": PROVIDER_RETRIES})
                 # A row too, not just a journal. Found 2026-08-23: this branch
                 # wrote the record and then `continue`d, so results.json came up
                 # short of the manifest's N while still looking like a complete
@@ -441,8 +477,8 @@ async def main():
                 journal["grading_report"] = report
             if grading_error is not None:
                 journal["grading_error"] = grading_error
-            (runs_dir / f"{tid}__{ARM.name}__r{rep}.json").write_text(
-                json.dumps(journal, indent=1) + "\n")
+            _atomic_write_journal(
+                runs_dir / f"{tid}__{ARM.name}__r{rep}.json", journal)
 
             if grading_error is not None:
                 # Keep one visible row per manifest cell, but flag this as an

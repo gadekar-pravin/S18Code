@@ -223,6 +223,16 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
                 run.unusable_replies += 1
                 history.append("write path must be a JSON string")
                 continue
+            content = act.get("content", "")
+            # Found 2026-08-23: inline JSON content=null passed parse_reply()
+            # and reached Path.write_text(), whose TypeError escaped run_loop
+            # and journalled the entire paid cell as a harness abort. Content is
+            # model data, so a wrong type is an unusable reply just like a
+            # non-string path or done.success, and the model gets to retry.
+            if not isinstance(content, str):
+                run.unusable_replies += 1
+                history.append("write content must be a JSON string")
+                continue
             if cfg.guard and _protected(path):
                 run.steps.append(Step("refused", path, False, "protected path"))
                 history.append(f"REFUSED to write {path}: it grades your work. Fix the source instead.")
@@ -248,7 +258,7 @@ async def run_loop(task: dict, ws: pathlib.Path, cfg: Config, llm, model: str) -
                 history.append(f"REFUSED to write {path}: it is not a declared writable file.")
                 continue
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(act.get("content", ""))
+            p.write_text(content)
             run.steps.append(Step("edit", path, True))
             history.append(f"wrote {path}")
 

@@ -16,6 +16,76 @@ from S18Code.harnesses.base import Step, TaskRun
 from S18Code import run_assignment as runner
 
 
+def test_atomic_journal_uses_flushed_same_directory_temp_before_replace(
+        tmp_path, monkeypatch):
+    """Found 2026-08-23: an interrupted direct write poisoned no-clobber."""
+    path = tmp_path / "runs" / "cell.json"
+    path.parent.mkdir()
+    path.write_text("old complete journal\n")
+    observed = {"flushes": 0}
+    real_named_temporary_file = runner.tempfile.NamedTemporaryFile
+
+    class TrackedStream:
+        def __init__(self, stream):
+            self.stream = stream
+            self.name = stream.name
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, value):
+            return self.stream.write(value)
+
+        def flush(self):
+            observed["flushes"] += 1
+            return self.stream.flush()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+    def tracked_temporary(*args, **kwargs):
+        observed["temp_dir"] = pathlib.Path(kwargs["dir"])
+        return TrackedStream(real_named_temporary_file(*args, **kwargs))
+
+    def interrupted_replace(source, destination):
+        temporary = pathlib.Path(source)
+        observed["replace"] = (
+            temporary.parent, pathlib.Path(destination), temporary.read_text())
+        raise OSError("replace interrupted")
+
+    monkeypatch.setattr(runner.tempfile, "NamedTemporaryFile", tracked_temporary)
+    monkeypatch.setattr(runner.os, "replace", interrupted_replace)
+
+    with pytest.raises(OSError, match="replace interrupted"):
+        runner._atomic_write_journal(path, {"reply": "irreplaceable"})
+
+    assert (observed, path.read_text(), sorted(path.parent.glob("*.tmp"))) == (
+        {"flushes": 1, "temp_dir": path.parent,
+         "replace": (path.parent, path,
+                     '{\n "reply": "irreplaceable"\n}\n')},
+        "old complete journal\n", [])
+
+
+def test_atomic_journal_serialises_before_creating_a_temp_file(
+        tmp_path, monkeypatch):
+    path = tmp_path / "runs" / "cell.json"
+    path.parent.mkdir()
+    opened = []
+
+    def unexpected_temp(*args, **kwargs):
+        opened.append(kwargs.get("dir"))
+        raise AssertionError("temp created before serialisation succeeded")
+
+    monkeypatch.setattr(runner.tempfile, "NamedTemporaryFile", unexpected_temp)
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        runner._atomic_write_journal(path, {"bad": object()})
+    assert (opened, path.exists()) == ([], False)
+
+
 def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypatch, capsys):
     out = tmp_path / "assignment"
     monkeypatch.setattr(runner, "OUT", out)
@@ -286,6 +356,14 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["run_assignment.py",
                                       "t10_source_repair_average",
                                       "t11_integrity_parity_lock"])
+    journal_writes = []
+    real_atomic_write = runner._atomic_write_journal
+
+    def record_atomic_write(path, record):
+        journal_writes.append(path.name)
+        real_atomic_write(path, record)
+
+    monkeypatch.setattr(runner, "_atomic_write_journal", record_atomic_write)
 
     async def fake_run_loop(task, ws, cfg, llm, model):
         runner.USAGE.append({"total_tokens": 7, "raw": "r"})
@@ -318,6 +396,9 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     assert (out / "runs" /
             "t10_source_repair_average__s17_rules__r0.ABORTED.json").is_file()
     assert "ABORTED OSError (journalled; not a result)" in capsys.readouterr().out
+    assert journal_writes == [
+        "t10_source_repair_average__s17_rules__r0.ABORTED.json",
+        "t11_integrity_parity_lock__s17_rules__r0.json"]
 
 
 def test_startup_replaces_stale_derived_results_before_any_cell(

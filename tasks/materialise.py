@@ -7,7 +7,7 @@ the verdict.
 """
 from __future__ import annotations
 
-import json, os, pathlib, shutil, subprocess, tempfile
+import hashlib, hmac, json, os, pathlib, secrets, shutil, subprocess, tempfile
 
 
 # Everything the interpreter needs and nothing else. Added 2026-08-22, found
@@ -27,7 +27,7 @@ _ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP",
                   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT")
 
 
-_VERDICT_PREFIX = b"S18_VERDICT_V1:"
+_VERDICT_PREFIX = b"S18_VERDICT_V2:"
 
 # This program is passed with `python3 -c`, not written into the grading room.
 # Found 2026-08-23: the old parent read JUnit XML only after the pytest process
@@ -36,49 +36,89 @@ _VERDICT_PREFIX = b"S18_VERDICT_V1:"
 # as pytest returns, before interpreter shutdown, and writes the inert result to
 # an inherited pipe. Bytes already in a pipe cannot be replaced at exit.
 #
-# The write fd is substituted into the program instead of appearing in
-# sys.argv. That is not claimed as a security boundary: code specifically
-# targeting this wrapper can inspect live interpreter state or probe open fds.
-# The measured closure is the generic exit-time report overwrite described
-# above; duplicate, conflicting and missing records are also fail-closed.
+# Found 2026-08-23: the write fd is reachable by candidate code in this same
+# interpreter. Probing inherited descriptors, writing one well-formed V1 pass,
+# then calling os._exit(0) prevented the wrapper's write and was
+# indistinguishable from an honest pass. V2 authenticates the payload with a
+# fresh parent secret delivered through a separate read-only pipe. The wrapper
+# consumes and closes that pipe before importing pytest, and the secret remains
+# a closure local rather than a module global.
+#
+# This closes the executed fd-probe forgery, not the class. Candidate code that
+# walks live frames, gc objects or the wrapper closure may still recover a
+# same-interpreter secret; that route has not been attempted. Duplicate,
+# conflicting, unauthenticated and missing records remain separate fail-closed
+# outcomes.
 _PYTEST_WRAPPER = r'''
-import json
 import os
-import sys
-from xml.etree import ElementTree
-import pytest
 
-_fd = __S18_VERDICT_FD__
-_dumps = json.dumps
-_int = int
-_parse = ElementTree.parse
-_write = os.write
-_prefix = b"S18_VERDICT_V1:"
-
-def _counts(path):
+def _read_secret(fd):
+    chunks = []
+    remaining = 32
     try:
-        root = _parse(path).getroot()
-    except (OSError, ElementTree.ParseError):
-        return None
-    total = [0, 0, 0, 0]
-    seen = False
-    for suite in root.iter("testsuite"):
-        seen = True
-        for i, attr in enumerate(("tests", "failures", "skipped", "errors")):
-            try:
-                total[i] += _int(suite.get(attr, 0))
-            except (TypeError, ValueError):
-                return None
-    return total if seen else None
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    secret = b"".join(chunks)
+    if len(secret) != 32:
+        raise RuntimeError("verdict secret was incomplete")
+    return secret
 
-report_path = sys.argv[1]
-pytest_exit = pytest.main(["-q", "--no-header", "--junitxml=" + report_path])
-counts = _counts(report_path)
-if counts is not None:
-    payload = _dumps({"counts": counts, "exit_code": pytest_exit},
-                     separators=(",", ":"), sort_keys=True).encode("ascii")
-    _write(_fd, _prefix + payload + b"\n")
-raise SystemExit(pytest_exit)
+def _main(verdict_fd, secret_fd, report_path):
+    secret = _read_secret(secret_fd)
+
+    # These imports happen only after the secret fd has been consumed and
+    # closed, and before pytest can import candidate code.
+    import hashlib
+    import hmac
+    import json
+    from xml.etree import ElementTree
+    import pytest
+
+    dumps = json.dumps
+    int_type = int
+    parse = ElementTree.parse
+    write = os.write
+    prefix = b"S18_VERDICT_V2:"
+
+    def emit(payload):
+        # `secret` is deliberately a closure local, not reachable as a module
+        # global. Same-interpreter closure/frame inspection remains out of scope.
+        authenticator = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+        write(verdict_fd, prefix + authenticator.encode("ascii") + b":" +
+              payload + b"\n")
+
+    def counts(path):
+        try:
+            root = parse(path).getroot()
+        except (OSError, ElementTree.ParseError):
+            return None
+        total = [0, 0, 0, 0]
+        seen = False
+        for suite in root.iter("testsuite"):
+            seen = True
+            for i, attr in enumerate(("tests", "failures", "skipped", "errors")):
+                try:
+                    total[i] += int_type(suite.get(attr, 0))
+                except (TypeError, ValueError):
+                    return None
+        return total if seen else None
+
+    pytest_exit = pytest.main(["-q", "--no-header", "--junitxml=" + report_path])
+    outcome_counts = counts(report_path)
+    if outcome_counts is not None:
+        payload = dumps({"counts": outcome_counts, "exit_code": pytest_exit},
+                        separators=(",", ":"), sort_keys=True).encode("ascii")
+        emit(payload)
+    raise SystemExit(pytest_exit)
+
+import sys
+_main(__S18_VERDICT_FD__, __S18_SECRET_FD__, sys.argv[1])
 '''
 
 
@@ -290,15 +330,23 @@ def _run_and_report(room: pathlib.Path) -> dict:
     os.close(fd)
     os.unlink(xml_path)               # pytest creates it; absence is the signal
     read_fd, write_fd = os.pipe()
+    secret_read_fd, secret_write_fd = os.pipe()
+    secret = secrets.token_bytes(32)
     try:
-        wrapper = _PYTEST_WRAPPER.replace("__S18_VERDICT_FD__", str(write_fd))
+        os.write(secret_write_fd, secret)
+        os.close(secret_write_fd)
+        secret_write_fd = None
+        wrapper = (_PYTEST_WRAPPER
+                   .replace("__S18_VERDICT_FD__", str(write_fd))
+                   .replace("__S18_SECRET_FD__", str(secret_read_fd)))
         try:
             r = subprocess.run(
                 ["python3", "-c", wrapper, xml_path],
                 cwd=room, capture_output=True, text=True, timeout=120,
-                env=sanitized_env(), pass_fds=(write_fd,))
+                env=sanitized_env(), pass_fds=(write_fd, secret_read_fd))
         finally:
             os.close(write_fd)
+            os.close(secret_read_fd)
 
         # A candidate-created descendant may still hold a copy of the write fd.
         # Only bytes present when the pytest process exits are eligible; a
@@ -316,34 +364,47 @@ def _run_and_report(room: pathlib.Path) -> dict:
         verdict_bytes = b"".join(chunks)
     finally:
         os.close(read_fd)
+        if secret_write_fd is not None:
+            os.close(secret_write_fd)
         try:
             os.unlink(xml_path)
         except OSError:
             pass
 
     tail = (r.stdout or r.stderr)[-400:]
-    records, clean_channel = _decode_verdicts(verdict_bytes)
-    if not records:
-        return derive_status(r.returncode, None, tail)
-    if not clean_channel or len(records) != 1:
+    return _status_from_verdict_bytes(
+        r.returncode, tail, verdict_bytes, secret)
+
+
+def _status_from_verdict_bytes(exit_code: int, tail: str, verdict_bytes: bytes,
+                               secret: bytes) -> dict:
+    """Authenticate and classify the verdict channel without running pytest."""
+    if not verdict_bytes:
+        return derive_status(exit_code, None, tail)
+    records, clean_channel = _decode_verdicts(verdict_bytes, secret)
+    if not clean_channel or not records:
         return _refused_verdict(
-            r.returncode, tail,
-            "conflicting or duplicate verdict records; grading refused")
+            exit_code, tail,
+            "verdict bytes failed authentication; grading refused")
+    if len(records) != 1:
+        return _refused_verdict(
+            exit_code, tail,
+            "duplicate authenticated verdict records; grading refused")
 
     record = records[0]
     counts = tuple(record["counts"])
-    if record["exit_code"] != r.returncode:
-        status = derive_status(r.returncode, counts, tail)
+    if record["exit_code"] != exit_code:
+        status = derive_status(exit_code, counts, tail)
         status["all_passed"] = False
         status["tail"] = _with_reason(
             tail, f"verdict exit {record['exit_code']} contradicts process exit "
-                  f"{r.returncode}; grading refused")
+                  f"{exit_code}; grading refused")
         return status
-    return derive_status(r.returncode, counts, tail)
+    return derive_status(exit_code, counts, tail)
 
 
-def _decode_verdicts(data: bytes) -> tuple[list[dict], bool]:
-    """Return well-formed records and whether the entire channel was canonical."""
+def _decode_verdicts(data: bytes, secret: bytes) -> tuple[list[dict], bool]:
+    """Return authenticated records and whether every byte was canonical."""
     if not data:
         return [], True
     clean = data.endswith(b"\n")
@@ -352,8 +413,15 @@ def _decode_verdicts(data: bytes) -> tuple[list[dict], bool]:
         if not line.startswith(_VERDICT_PREFIX):
             clean = False
             continue
+        signed = line[len(_VERDICT_PREFIX):]
+        authenticator, separator, payload = signed.partition(b":")
+        expected = hmac.new(secret, payload, hashlib.sha256).hexdigest().encode("ascii")
+        if (separator != b":" or len(authenticator) != 64 or
+                not hmac.compare_digest(authenticator, expected)):
+            clean = False
+            continue
         try:
-            record = json.loads(line[len(_VERDICT_PREFIX):].decode("ascii"))
+            record = json.loads(payload.decode("ascii"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             clean = False
             continue

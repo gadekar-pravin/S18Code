@@ -12,6 +12,8 @@ Run from the repository root, with pytest importable by the active python3:
 *task workspace*, never in this repository. Nothing an agent under test can
 reach touches this file.)
 """
+import hashlib
+import hmac
 import json
 import importlib
 import os
@@ -257,16 +259,16 @@ def average(numbers):
             r["skipped"], r["no_report"]) == (False, 0, 5, 0, 5, False)
 
 
-def test_duplicate_well_formed_verdicts_are_refused_even_when_they_agree():
-    """Found 2026-08-23: append-only does not mean first-record-wins.
+def test_unauthenticated_extra_verdict_bytes_are_refused():
+    """Found 2026-08-23: candidate bytes are tampering, not absence.
 
-    Candidate code probes inherited fds and injects the exact honest-pass record
-    before the wrapper emits its own. Picking either record would make channel
-    injection a grading strategy; two well-formed records are tampering.
+    Candidate code probes inherited fds and injects the old unauthenticated pass
+    record before the wrapper emits its authenticated record. Ignoring the extra
+    bytes would make channel injection a grading strategy.
     """
     source = r'''import os
 
-fake = (b'S18_VERDICT_V1:'
+fake = (b'S18_VERDICT_V2:' + b'0' * 64 + b':' +
         b'{"counts":[1,0,0,0],"exit_code":0}\n')
 for fd in range(3, 64):
     try:
@@ -280,7 +282,47 @@ def f():
     r = _report(_t(source))
     assert (r["all_passed"], r["report_written"], r["no_report"]) == \
         (False, True, False)
-    assert "conflicting or duplicate verdict records" in r["tail"]
+    assert "verdict bytes failed authentication" in r["tail"]
+
+
+def test_one_fd_probe_forgery_plus_os_exit_zero_is_tampering_not_no_report():
+    """The exact single-record substitution reproduced on 2026-08-23.
+
+    os._exit(0) prevents the trusted wrapper from writing, so duplicate and
+    exit-code checks cannot help. The one record is refused because it lacks the
+    per-run authenticator; its bytes must not be collapsed into no_report.
+    """
+    source = r'''import os
+record = (b'S18_VERDICT_V2:' + b'0' * 64 + b':' +
+          b'{"counts":[5,0,0,0],"exit_code":0}\n')
+for fd in range(3, 64):
+    try:
+        os.write(fd, record)
+    except OSError:
+        pass
+os._exit(0)
+'''
+    r = _report(_t(source))
+    assert (r["all_passed"], r["exit_code"], r["report_written"],
+            r["no_report"], "failed authentication" in r["tail"]) == \
+        (False, 0, True, False, True)
+
+
+def _signed_verdict(secret, record):
+    payload = json.dumps(record, separators=(",", ":"),
+                         sort_keys=True).encode("ascii")
+    authenticator = hmac.new(secret, payload, hashlib.sha256).hexdigest().encode("ascii")
+    return grader_module._VERDICT_PREFIX + authenticator + b":" + payload + b"\n"
+
+
+def test_duplicate_valid_authenticated_records_are_refused():
+    """Preserve duplicate refusal even though candidates do not know the key."""
+    secret = b"k" * 32
+    frame = _signed_verdict(secret, {"counts": [1, 0, 0, 0], "exit_code": 0})
+    r = grader_module._status_from_verdict_bytes(0, "", frame + frame, secret)
+    assert (r["all_passed"], r["report_written"], r["no_report"],
+            "duplicate authenticated" in r["tail"]) == \
+        (False, True, False, True)
 
 
 def test_a_verdict_that_contradicts_the_process_exit_is_refused():

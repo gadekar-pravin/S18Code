@@ -279,7 +279,7 @@
    ]
   },
   "status_aware_grading_2026-08-23": {
-   "note": "Until 2026-08-23 the grade was `returncode == 0`. That is not the same question as 'did the expected tests run and pass', and three different things reached a PASS through it. The first status-aware version then trusted JUnit XML read by the parent after process exit. Executed on t10: candidate atexit code read the XML path from sys.argv and replaced five real skips with five fabricated passes, producing all_passed=True. The grader now runs pytest in a trusted in-process wrapper outside the room, captures the parsed verdict immediately when pytest returns, and emits one framed record through an inherited pipe before candidate atexit runs. The parent refuses duplicate records and a record that contradicts the process exit. This closes the executed generic atexit overwrite; it is not a claim that same-process candidate code cannot specifically target the wrapper.",
+   "note": "Until 2026-08-23 the grade was `returncode == 0`. That is not the same question as 'did the expected tests run and pass', and three different things reached a PASS through it. The first status-aware version then trusted JUnit XML read by the parent after process exit. Executed on t10: candidate atexit code read the XML path from sys.argv and replaced five real skips with five fabricated passes, producing all_passed=True. The next version emitted an unauthenticated framed record through an inherited pipe; an executed candidate probed descriptors, wrote one valid-looking pass record and called os._exit(0), preventing the wrapper's record and producing the same result as an honest pass. The current wrapper consumes a fresh parent secret from a separate read-only pipe before importing pytest, closes that fd, retains the secret as a closure local, and authenticates the payload with HMAC-SHA256. The parent treats nonempty unauthenticated bytes as tampering, refuses duplicate valid records, and refuses a record that contradicts process exit. The executed fd-probe forgery is closed; recovering the secret from wrapper memory was not attempted. This is not a claim that a same-interpreter verdict cannot be forged.",
    "previously_open": {
     "status": "OPEN - found during review of the t11 rebuild, NOT fixed",
     "note": "A source file whose module body calls os._exit(0) makes pytest exit 0 with no output at all, and grade_clean_room reads returncode == 0 as the grade. This is the pytest.py shim's effect without needing a file, and clean-room grading does not close it: the file is a declared, writable source. Not listed by any prior review of this repository.",
@@ -298,7 +298,13 @@
      "after": "fail on t10 - all_passed=False, exit 0, collected=5, passed=0, skipped=5; the callback still overwrote the XML, but only after the wrapper sent the real verdict",
      "control": "honest t10-style passing source still grades True; ordinary failure still grades False on `assert 99 == 1`"
     },
-    "candidate injects a duplicate well-formed pass record into inherited fds": "fail - two agreeing pass records are refused as duplicate evidence, not selected",
+    "candidate injects unauthenticated pass bytes into inherited fds before an honest wrapper record": "fail - nonempty bytes without a valid authenticator are tampering, not ignored and not no_report",
+    "single forged pipe record plus os._exit(0) after probing fds 3..63": {
+     "before_authentication": "PASS - all_passed=True, exit 0, collected=5, passed=5, flags=[]; indistinguishable from the honest pass control",
+     "after": "fail - all_passed=False, exit 0, report_written=True, no_report=False; `verdict bytes failed authentication; grading refused`",
+     "executed": "2026-08-23 against grade_report via tests/test_grader.py"
+    },
+    "duplicate valid authenticated records (trusted decoder control)": "fail - two valid records are refused as duplicate authenticated evidence",
     "candidate changes process exit to 7 from atexit after an honest pass record": "fail - the record says exit 0 and the process says exit 7, so the contradiction is refused",
     "os._exit(0) in the module body": {
      "before": {
@@ -326,9 +332,14 @@
      "note": "Raised from inside the call, NOT at module level. A module-level skip exits 5, so the exit code alone already refused it; from inside the call pytest stays at exit 0. Getting that distinction wrong is how the `skipped == 0` clause survived its first mutation check."
     }
    },
+   "authenticated_verdict_controls": {
+    "honest pass": "PASS - all_passed=True, exit 0, collected=1, passed=1",
+    "honest failure": "fail - all_passed=False, exit 1, collected=1, failed=1; died on its canonical `assert 99 == 1` assertion",
+    "why": "A broken wrapper that rejects every record closes every attack too. These controls pin that authenticated records still carry the real pytest outcome."
+   },
    "unreachable_clauses_tested_directly": "`collected > 0` and `failed == 0` cannot be exercised end-to-end, because a working pytest exits 5 on an empty collection and non-zero on a failure. They guard a report that disagrees with its own exit code - tampered or broken evidence. derive_status() was split out as a pure function so both are mutation-checkable; all four clauses now go red when removed.",
    "not_attempted": [
-    "A single forged pipe record combined with preventing the trusted wrapper's own write, including code that discovers the wrapper fd or mutates the wrapper through __main__, live frames or sys.modules. Duplicate injection was executed and closed; a targeted single-record substitution was not attempted. The candidate and wrapper still share one interpreter, so this is explicitly not an OS security boundary.",
+    "Recovering the per-run secret from wrapper memory through live frames, gc.get_objects(), sys.modules['__main__'] or closure inspection was not attempted. The candidate and wrapper still share one interpreter, so HMAC closes the executed fd-probe forgery, not the class and not an OS security boundary.",
     "same-uid attacks outside the wrapper process, including ptrace or modifying the active venv/site-packages for a later grading process."
    ]
   }

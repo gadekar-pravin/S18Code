@@ -224,6 +224,24 @@ def test_non_string_paths_are_unusable_replies_not_cell_aborts(ws, action, path)
                 f"{action} path must be a JSON string")
 
 
+def test_non_string_write_content_is_unusable_and_the_model_can_retry(ws):
+    """Found 2026-08-23: content=null aborted the whole paid cell."""
+    prompts = []
+    replies = iter(['{"action":"write","path":"calc.py","content":null}',
+                    '{"action":"done","success":false,"note":"n"}'])
+
+    async def llm(prompt, system):
+        prompts.append(json.loads(prompt))
+        return next(replies)
+
+    run = asyncio.run(_run(llm, ws))
+    assert (run.calls, run.unusable_replies, run.ended,
+            [s.kind for s in run.steps], (ws / "calc.py").read_text(),
+            prompts[1]["history"][-1]) == (
+                2, 1, "done", ["answer"], "x = 1\n",
+                "write content must be a JSON string")
+
+
 def test_task_without_writable_keeps_legacy_source_contract(ws):
     task = _task()
     assert writable_paths(task) == ("calc.py",)
