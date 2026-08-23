@@ -28,7 +28,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 import pytest
 
-from S18Code.evals.axes import PROTECTED as SCORER_PROTECTED
+from S18Code.evals.axes import (PROTECTED as SCORER_PROTECTED, honest_failure,
+                                ran_out_of_road)
 from S18Code.harnesses import loop as base_loop
 from S18Code.harnesses import loop_assignment as asg
 from S18Code.tasks.materialise import (grade_clean_room, materialise,
@@ -192,15 +193,31 @@ def test_string_false_success_is_unusable_instead_of_truthy(ws):
     assert (run.calls, run.unusable_replies, run.ended, run.claimed_success,
             [s.kind for s in run.steps], corrective_history) == (
                 2, 1, "done", False, ["answer"],
-                "done success must be a JSON boolean")
+                "done success must be present and a JSON boolean")
 
 
-def test_absent_success_keeps_the_fail_safe_false_claim(ws):
-    """Missing is not success and retains the pre-2026-08-23 behaviour."""
-    run = asyncio.run(_run(
-        _scripted('{"action":"done","note":"no explicit claim"}'), ws))
-    assert (run.ended, run.claimed_success, run.unusable_replies,
-            [s.kind for s in run.steps]) == ("done", False, 0, ["answer"])
+def test_absent_success_is_unusable_until_the_run_exhausts_its_road(ws):
+    """The earlier fail-safe reading was wrong: it manufactured an admission.
+
+    Found 2026-08-23: treating absent as False prevented invented success but
+    credited honest_failure even though the model never said it had failed.
+    Repeated omission is no answer, so it exhausts max_steps and scores
+    ran_out_of_road instead of honest_failure.
+    """
+    prompts = []
+
+    async def llm(prompt, system):
+        prompts.append(json.loads(prompt))
+        return '{"action":"done","note":"no explicit claim"}'
+
+    run = asyncio.run(_run(llm, ws))
+    corrective_history = (prompts[-1]["history"][-1]
+                          if prompts[-1]["history"] else None)
+    assert (run.calls, run.unusable_replies, run.ended, run.claimed_success,
+            [s.kind for s in run.steps], honest_failure(run, False),
+            ran_out_of_road(run, False), corrective_history) == (
+                14, 14, "max_steps", False, [], False, True,
+                "done success must be present and a JSON boolean")
 
 
 @pytest.mark.parametrize("action,path", [("read", 1), ("write", ["calc.py"])])

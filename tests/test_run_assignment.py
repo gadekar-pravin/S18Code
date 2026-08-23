@@ -98,6 +98,7 @@ def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypa
 
     calls = 0
     counts_at_cell_start = []
+    long_final_file = "# complete journal evidence\n" + "x = 1\n" * 900
 
     async def fake_run_loop(task, ws, cfg, llm, model):
         nonlocal calls
@@ -106,6 +107,8 @@ def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypa
         runner.PROVIDER_REQUESTS += 2
         runner.PROVIDER_RETRIES += 1
         runner.USAGE.append({"total_tokens": calls, "raw": f"reply-{calls}"})
+        if task["id"] == "t10_source_repair_average":
+            (ws / "calc.py").write_text(long_final_file)
         return TaskRun(task_id=task["id"], harness=cfg.name, model=model,
                        steps=[Step("edit", next(iter(task["files"])), True),
                               Step("answer", detail="done")],
@@ -152,7 +155,7 @@ def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypa
         "steps": journal["steps"],
         "usage": journal["usage"],
         "provider_counts": (journal["provider_requests"], journal["provider_retries"]),
-        "final_files": sorted(journal["final_files"]),
+        "final_files": journal["final_files"],
         "timed_out": journal["grading_report"]["grading_timed_out"],
         "no_report": journal["grading_report"]["no_report"],
     } == {
@@ -162,7 +165,7 @@ def test_grader_timeout_is_counted_failure_and_continues_grid(tmp_path, monkeypa
                   {"kind": "answer", "target": "", "ok": True, "detail": "done"}],
         "usage": [{"total_tokens": 1, "raw": "reply-1"}],
         "provider_counts": (2, 1),
-        "final_files": ["calc.py"],
+        "final_files": {"calc.py": long_final_file},
         "timed_out": True,
         "no_report": True,
     }
@@ -219,6 +222,38 @@ class _Response:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+
+def test_provider_reply_is_kept_complete_for_the_journal(monkeypatch):
+    """Found 2026-08-23: 4,000 characters silently replaced the paid reply."""
+    reply = '{"action":"done","success":false,"note":"' + "x" * 5000 + '"}'
+    monkeypatch.setattr(runner.urllib.request, "urlopen",
+                        lambda req, timeout: _Response())
+    monkeypatch.setattr(runner.json, "load", lambda response: {
+        "choices": [{"message": {"content": reply}}],
+        "usage": {"total_tokens": 123},
+    })
+    runner.USAGE.clear()
+    runner.PROVIDER_REQUESTS = 0
+    runner.PROVIDER_RETRIES = 0
+
+    returned = asyncio.run(runner.llm("prompt", "system"))
+
+    assert (returned, runner.USAGE) == (
+        reply, [{"total_tokens": 123, "reasoning_chars": 0, "raw": reply}])
+
+
+def test_final_files_include_complete_nested_and_missing_declared_paths(tmp_path):
+    """Found 2026-08-23: glob-plus-slice lost three kinds of file evidence."""
+    task = {"id": "t_journal", "files": {"nested/calc.py": "initial\n"},
+            "tests": {},
+            "writable": ["nested/calc.py", "created/later.py"]}
+    workspace = runner.materialise(task, root=str(tmp_path / "workspace"))
+    complete = "# longer than the old cap\n" + "value = 1\n" * 500
+    (workspace / "nested" / "calc.py").write_text(complete)
+
+    assert runner._final_files(workspace, task) == {
+        "nested/calc.py": complete, "created/later.py": None}
 
 
 def test_provider_retries_are_counted_without_changing_model_turns(tmp_path, monkeypatch):
@@ -385,14 +420,20 @@ def test_a_harness_abort_still_produces_a_row(tmp_path, monkeypatch, capsys):
     asyncio.run(runner.main())
 
     rows = json.loads((out / "results.json").read_text())["rows"]
+    aborted_journal = json.loads((out / "runs" /
+        "t10_source_repair_average__s17_rules__r0.ABORTED.json").read_text())
     assert len(rows) == 2, "one row per manifest cell, abort included"
     aborted = rows[0]
     assert (aborted["task"], aborted["not_a_result"], aborted["result_status"],
             aborted["solved"], aborted["harness_exception"]) == (
         "t10_source_repair_average", True, "harness_aborted", None,
         "OSError")
-    # the billed reply is still accounted for, not silently dropped
-    assert aborted["usage_total_tokens"] == 7
+    # The billed reply and partial workspace are still evidence on an abort.
+    assert (aborted["usage_total_tokens"], aborted_journal["final_files"]) == (
+        7, {"calc.py":
+            "def average(numbers):\n"
+            '    """Arithmetic mean. Returns 0 for an empty list."""\n'
+            "    return sum(numbers) / len(numbers)\n"})
     assert (out / "runs" /
             "t10_source_repair_average__s17_rules__r0.ABORTED.json").is_file()
     assert "ABORTED OSError (journalled; not a result)" in capsys.readouterr().out

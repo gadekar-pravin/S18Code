@@ -37,7 +37,7 @@ import asyncio, dataclasses, hashlib, json, os, pathlib, subprocess, sys, tempfi
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from S18Code.harnesses.loop import Config
 from S18Code.harnesses.loop_assignment import SYSTEM, run_loop
-from S18Code.tasks.materialise import grade_report, materialise
+from S18Code.tasks.materialise import grade_report, materialise, writable_paths
 from S18Code.evals.axes import score
 
 # ---------------------------------------------------------------- the manifest
@@ -115,6 +115,28 @@ def _grading_timeout_report(error: subprocess.TimeoutExpired) -> dict:
             "errors": 0, "all_passed": False, "any_skipped": False,
             "nothing_collected": False, "collection_errored": False,
             "no_report": True, "grading_timed_out": True, "tail": tail}
+
+
+def _final_files(workspace: pathlib.Path, task: dict) -> dict[str, str | None]:
+    """Return complete final state for every declared writable path.
+
+    Found 2026-08-23: the journal kept only 4,000 characters from top-level
+    ``*.py`` files, keyed by basename. A longer file lost the text that was
+    graded after the temporary workspace disappeared; a nested or missing
+    declared file was invisible altogether. Paths now come from the same
+    validated allowlist as the loop and grader, and ``None`` records absence.
+
+    Journal size remains bounded without truncating evidence: the allowlist
+    bounds the number of final files, and their contents come from the fixed
+    task manifest or from at most ``ARM.max_steps`` provider replies, each
+    subject to the provider's ``MAX_TOKENS`` output limit.
+    """
+    final = {}
+    for rel in writable_paths(task):
+        path = workspace / rel
+        final[rel] = path.read_text() if path.is_file() else None
+    return final
+
 
 def _api_key() -> str:
     """The provider key, read at call time so nothing is bound at import."""
@@ -200,11 +222,12 @@ async def llm(prompt, system):
             content = msg.get("content") or ""
             USAGE.append({**(d.get("usage") or {}),
                           "reasoning_chars": len(msg.get("reasoning") or ""),
-                          # The raw reply, bounded. The plan asks the journal to
-                          # carry every response; TaskRun has no field for it and
-                          # widening TaskRun would break rescore.py on the
-                          # nineteen historical runs, so it rides here.
-                          "raw": content[:4000]})
+                          # Found 2026-08-23: slicing at 4,000 characters made
+                          # the hosted reply non-reproducible exactly when it
+                          # could contain a longer submitted file. Keep it whole.
+                          # Journal size is bounded by ARM.max_steps successful
+                          # replies and MAX_TOKENS output tokens per reply.
+                          "raw": content})
             return content
         except urllib.error.HTTPError as e:
             # Status only. The body can echo request material and the header
@@ -411,7 +434,10 @@ async def main():
                      "seconds": time.time() - t0,
                      "usage": list(USAGE),
                      "provider_requests": PROVIDER_REQUESTS,
-                     "provider_retries": PROVIDER_RETRIES})
+                     "provider_retries": PROVIDER_RETRIES,
+                     # An abort can follow paid replies and partial edits; it is
+                     # still a journal and must preserve the workspace evidence.
+                     "final_files": _final_files(ws, t)})
                 # A row too, not just a journal. Found 2026-08-23: this branch
                 # wrote the record and then `continue`d, so results.json came up
                 # short of the manifest's N while still looking like a complete
@@ -471,8 +497,7 @@ async def main():
                        "usage": list(USAGE),
                        "provider_requests": PROVIDER_REQUESTS,
                        "provider_retries": PROVIDER_RETRIES,
-                       "final_files": {f.name: f.read_text()[:4000]
-                                       for f in sorted(ws.glob("*.py"))}}
+                       "final_files": _final_files(ws, t)}
             if report is not None:
                 journal["grading_report"] = report
             if grading_error is not None:
