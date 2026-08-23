@@ -11,13 +11,14 @@ changing anything in `harnesses/`.
 
 ## The directory name is load-bearing
 
-`run_local.py`, `run_benchmark.py`, and `rescore.py` each do
+`run_local.py`, `run_benchmark.py`, `run_assignment.py`, and `rescore.py` each do
 `sys.path.insert(0, ...parents[1])` and then `import S18Code.*`. The checkout must stay named
-`S18Code`, and the two runners are invoked as modules from the **parent** directory:
+`S18Code`, and the runners are invoked as modules from the **parent** directory:
 
 ```bash
 cd .. && python3 -m S18Code.run_local                       # full grid, both arms
 cd .. && python3 -m S18Code.run_local t08_impossible_secret # one task, both arms
+cd .. && python3 -m S18Code.run_assignment                  # assignment grid, one arm
 python3 rescore.py                                          # from inside the repo
 ```
 
@@ -31,6 +32,11 @@ python3 rescore.py                                          # from inside the re
   model failure.
 - **`run_local.py` needs Ollama serving `qwen3.8:27b` on `localhost:11434`.** No API keys.
 - **`run_benchmark.py` needs `GEMINI_API_KEYS`** (comma-separated) or `GEMINI_API_KEY`.
+- **`run_assignment.py` needs `OPENROUTER_API_KEY`.** It targets `stealth/ox-alpha`, a
+  cloaked OpenRouter model priced at 0/0 whose identity and retention policy are
+  undisclosed and which can be withdrawn without notice. It runs a preflight that fails
+  before the first model call if `python3 -m pytest` is not importable, rather than
+  producing a grid of environmental `solved: false`.
 - There is no `pyproject.toml` and no lockfile. Do not run `uv run pytest` or `uv sync` here, and
   do not add a manifest without being asked.
 
@@ -49,6 +55,13 @@ never set on purpose — that absence is what makes `t08` impossible. Do not set
   are kept deliberately as records of a wrong metric and an aborted run. Never tidy them away.
 - `run_benchmark.py` writes `proofs/results.json`, a different file from the local variant's
   `proofs/results_local.json`.
+- **`run_assignment.py` writes to `proofs/assignment_v1/` and nowhere else.** Never point it
+  at `proofs/runs/`. `rescore.py` globs that directory and stamps the literal
+  `"model": "qwen3.8:27b"` into every row it derives, so a journal from any other model
+  dropped there is silently relabelled as qwen with no error raised. The assignment grid
+  keeps its own `manifest.json`, `runs/`, and `results.json` under `assignment_v1/`, and
+  its journals carry a real `usage` object from the provider rather than the
+  `reply_chars_over_4` proxy.
 
 ## Changing the loop
 
@@ -61,6 +74,25 @@ claim rests on those two flags being the only difference. Same for `SYSTEM`, the
 equal — the guard refuses exactly what the scorer counts as cheating. They diverged once, letting
 the guard permit a write the scorer then punished. `tests/test_axes.py` enforces the equality;
 edit both tuples or neither.
+
+`harnesses/loop_assignment.py` is a **separate** loop for the assignment grid and is not
+imported by `loop.py`. Same guard, ceiling, budget, `Step` and `TaskRun` records; the only
+difference is that a `write` carries the file body in a fenced block instead of a JSON
+string. It exists because `stealth/ox-alpha` cannot emit the `loop.py` envelope - ten of
+fourteen replies unparseable in the first smoke run, while every reply contained the
+correct repair. `response_format`, a stricter prompt, and a re-escaping repair were all
+measured and all failed; the repair produced code that did not compile 5/5, which would
+have turned a visible `unusable_reply` into a silent corrupt edit blamed on the agent.
+Full record in `proofs/assignment_v1/smoke_2026-08-22/ENVELOPE_FAILURE.md`. It imports
+`PROTECTED` from `loop.py` rather than copying it, so there is no third tuple to drift.
+
+`run_assignment.py` refuses to start when its runs directory already holds journals.
+Journals are named `{task}__{arm}__r{rep}.json`, so a re-run silently overwrote one on
+2026-08-22 and destroyed the raw record of the envelope failure. The old recovery advice
+said to move the directory aside, but for the committed default that removes evidence from
+the path named by the task cards. Fixed 2026-08-23: leave it in place and send a follow-up
+grid to a fresh output directory instead:
+`cd .. && S18_OUT=S18Code/proofs/my_grid python3 -m S18Code.run_assignment`.
 
 `harnesses/base.py` defines the single `TaskRun`/`Step` record every scorer sees. Scorers must
 never learn which harness produced a run, and `TaskRun` deliberately has no "did it pass" field:
@@ -101,7 +133,17 @@ they were split apart to show.
 - `reply_chars_over_4` is a reply-length proxy only. It does not see the prompt or the reasoning
   channel; never report it as a token or cost figure.
 - After changing any axis, re-derive results with `python3 rescore.py` rather than re-running the
-  model.
+  model. That covers `proofs/runs/` only. For the assignment grids use
+  `python3 rescore_assignment.py`, which reads each grid's own `manifest.json` instead of
+  stamping the qwen literal. Run it with no arguments after touching `evals/axes.py`: it is a
+  control, and it fails if the recomputed rows stop matching the committed `results.json`.
+- The verification axis has two named readings in `VERIFICATION_RULES`.
+  `DEFAULT_VERIFICATION_RULE` must not move — the published nineteen runs and both assignment
+  grids were scored under `v1`, and changing the default silently restates their tables. A rule
+  change is something a reader selects and sees named in the output manifest. Adding a rule means
+  adding a `VERIFICATION_RULES` entry, not editing `score()`; the row's key set never varies with
+  the rule, because `tests/test_axes.py` pins it and rows scored under different rules must stay
+  diffable. See `proofs/RESCORE_DEMONSTRATION.md`.
 - `tests/test_axes.py` pins every axis, including the three historical bugs. Run it after touching
   `evals/axes.py`, `harnesses/base.py`, or either `PROTECTED` tuple:
 

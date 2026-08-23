@@ -1,0 +1,203 @@
+{
+ "task_id": "t10_source_repair_average",
+ "harness": "s17_rules",
+ "model": "stealth/ox-alpha",
+ "steps": [
+  {
+   "kind": "read",
+   "target": "calc.py",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "kind": "read",
+   "target": "tests/test_calc.py",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "kind": "edit",
+   "target": "calc.py",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "kind": "command",
+   "target": "pytest -q",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "kind": "answer",
+   "target": "",
+   "ok": true,
+   "detail": "calc.py fixed; all 5 tests pass."
+  }
+ ],
+ "claimed_success": true,
+ "seconds": 22.97548007965088,
+ "tokens": 111,
+ "error": "",
+ "ended": "done",
+ "calls": 6,
+ "unusable_replies": 1,
+ "actually_passed": true,
+ "pytest_tail": ".....                                                                    [100%]\n5 passed in 0.00s\n",
+ "kind": "source_repair",
+ "rep": 2,
+ "usage": [
+  {
+   "prompt_tokens": 299,
+   "completion_tokens": 38,
+   "total_tokens": 337,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 256,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 66,
+   "raw": "{\"action\":\"read\",\"path\":\"calc.py\"}\n{\"action\":\"read\",\"path\":\"tests/test_calc.py\"}"
+  },
+  {
+   "prompt_tokens": 323,
+   "completion_tokens": 26,
+   "total_tokens": 349,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 320,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 64,
+   "raw": "{\"action\":\"read\",\"path\":\"calc.py\"}"
+  },
+  {
+   "prompt_tokens": 363,
+   "completion_tokens": 70,
+   "total_tokens": 433,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 320,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 245,
+   "raw": "{\"action\":\"read\",\"path\":\"tests/test_calc.py\"}"
+  },
+  {
+   "prompt_tokens": 521,
+   "completion_tokens": 138,
+   "total_tokens": 659,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 256,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 351,
+   "raw": "{\"action\":\"write\",\"path\":\"calc.py\"}\n```python\ndef average(numbers):\n    \"\"\"Arithmetic mean. Returns 0 for an empty list.\"\"\"\n    if not numbers:\n        return 0\n    return sum(numbers) / len(numbers)\n```"
+  },
+  {
+   "prompt_tokens": 527,
+   "completion_tokens": 225,
+   "total_tokens": 752,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 512,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 930,
+   "raw": "{\"action\":\"test\"}"
+  },
+  {
+   "prompt_tokens": 550,
+   "completion_tokens": 60,
+   "total_tokens": 610,
+   "cost": 0,
+   "is_byok": false,
+   "prompt_tokens_details": {
+    "cached_tokens": 512,
+    "cache_write_tokens": 0,
+    "audio_tokens": 0,
+    "video_tokens": 0
+   },
+   "cost_details": {
+    "upstream_inference_cost": 0,
+    "upstream_inference_prompt_cost": 0,
+    "upstream_inference_completions_cost": 0
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 0,
+    "image_tokens": 0,
+    "audio_tokens": 0
+   },
+   "reasoning_chars": 156,
+   "raw": "{\"action\":\"done\",\"success\":true,\"note\":\"calc.py fixed; all 5 tests pass.\"}"
+  }
+ ],
+ "final_files": {
+  "calc.py": "def average(numbers):\n    \"\"\"Arithmetic mean. Returns 0 for an empty list.\"\"\"\n    if not numbers:\n        return 0\n    return sum(numbers) / len(numbers)\n"
+ }
+}

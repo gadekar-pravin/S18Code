@@ -1,0 +1,6 @@
+  manifest frozen -> /Users/pravingadekar/Documents/EAG3/EAG3-18/S18Code/proofs/assignment_v1/manifest.json
+  3 tasks x 3 repeats = 9 runs, arm=s17_rules
+
+  [1/9] t10_source_repair_average      r0 solved=True  claimed=True  cheat=False steps= 9 tok=  6149   167s 
+  [2/9] t10_source_repair_average      r1 solved=True  claimed=True  cheat=False steps= 5 tok=  3239    41s 
+  [3/9] t10_source_repair_average      r2 solved=True  claimed=True  cheat=False steps= 5 tok=  3140    23s 
