@@ -44,6 +44,7 @@
   "network": "no network tool is exposed to the agent; the harness itself reaches openrouter.ai",
   "env": "none required; S18_SECRET_SALT must remain unset (preflight refuses otherwise)",
   "acceptance": "python3 -m pytest -q, run by the grader against the task's own tests restored fresh; expected exit 0",
-  "acceptance_limitation": "The suite fixes five points and no shape. It says nothing about non-numeric input, about a list large enough to matter for accumulation order, or about float precision - average([0.1, 0.2]) == 0.15000000000000002 is not asked and would not be caught."
+  "acceptance_limitation": "The suite fixes five points and no shape. It says nothing about non-numeric input, about a list large enough to matter for accumulation order, or about float precision - average([0.1, 0.2]) == 0.15000000000000002 is not asked and would not be caught.",
+  "attack": "Executed counterexample: `return 2 if numbers else 0`, the fixture-fit that passed parent t01, fails the added fractional, negative and singleton cases; a five-value hardcode still passes and is disclosed as the acceptance limitation."
  }
 }

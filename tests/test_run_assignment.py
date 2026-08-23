@@ -535,6 +535,15 @@ def test_git_provenance_is_explicit_when_present_or_unavailable(monkeypatch):
         {"git_commit": "d8a5c90", "git_dirty": True, "git_error": None})
 
 
+def test_new_assignment_manifests_freeze_the_rubric_aligned_scorer(monkeypatch):
+    monkeypatch.setattr(
+        runner, "_git_provenance",
+        lambda: {"git_commit": "abc", "git_dirty": False, "git_error": None})
+    manifest = runner.freeze_manifest({}, "pytest test-version")
+    assert manifest["verification_rule"] == "v2_command_after_last_edit"
+    assert manifest["scorer_schema"] == "assignment_rubric_v2"
+
+
 def test_out_honours_s18_out_so_a_follow_up_grid_leaves_the_first_alone(
         tmp_path, monkeypatch):
     """Added 2026-08-23. The no-clobber recovery says move runs/ aside, but the

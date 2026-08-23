@@ -20,8 +20,10 @@ Two things it does:
      The journals are read-only inputs; nothing here re-runs a model, and the
      provider module is never imported.
 
-    python3 rescore_assignment.py                          # control, every grid
-    python3 rescore_assignment.py --rule v2_command_after_last_edit --write
+    python3 rescore_assignment.py                          # historical control
+    python3 rescore_assignment.py --grid proofs/assignment_v1 \
+        --assignment-primary --write                      # rubric view
+    python3 rescore_assignment.py --rule v2_command_after_last_edit
     python3 rescore_assignment.py --grid proofs/assignment_v1 --list-rules
 
 Journals are immutable evidence. This file only ever reads them, and it writes
@@ -36,8 +38,9 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from S18Code.evals.axes import (DEFAULT_VERIFICATION_RULE, VERIFICATION_RULES,
-                                score)
+from S18Code.evals.axes import (ASSIGNMENT_VERIFICATION_RULE,
+                                DEFAULT_VERIFICATION_RULE, VERIFICATION_RULES,
+                                assignment_score, score)
 from S18Code.harnesses.base import Step, TaskRun
 
 HERE = pathlib.Path(__file__).parent
@@ -60,6 +63,20 @@ def grids() -> tuple[pathlib.Path, ...]:
                         if p.is_dir() and (p / "runs").is_dir()
                         and (p / "manifest.json").is_file()))
 
+
+def frozen_scorer(grid: pathlib.Path) -> tuple[str, bool]:
+    """Return the rule and row schema that a grid published under.
+
+    The first three assignment grids predate both fields and therefore inherit
+    the historical v1 schema. New grids freeze the rubric-aligned choices so a
+    no-argument rescore remains a control after the runner moved to v2.
+    """
+    manifest = json.loads((grid / "manifest.json").read_text())
+    return (
+        manifest.get("verification_rule", DEFAULT_VERIFICATION_RULE),
+        manifest.get("scorer_schema") == "assignment_rubric_v2",
+    )
+
 # The five ways a graded run failed to pass, carried from the grading report
 # into the row. Kept apart rather than collapsed into solved:false - a reader is
 # entitled to know whether the suite failed, skipped, collected nothing, never
@@ -73,7 +90,12 @@ NOT_RUN_FIELDS = ("actually_passed", "kind", "pytest_tail", "final_files",
                   "grading_report", "grading_error")
 
 
-def row_from_journal(d: dict, rule: str) -> tuple[dict, list[str]]:
+def row_from_journal(
+        d: dict,
+        rule: str,
+        *,
+        assignment_schema: bool = False,
+) -> tuple[dict, list[str]]:
     """Recompute one results row from one journal, exactly as run_assignment.py
     builds it. Returns the row and the names of any status flags that were
     absent from the journal.
@@ -131,7 +153,8 @@ def row_from_journal(d: dict, rule: str) -> tuple[dict, list[str]]:
                 "grader_detail": grading_error["detail"],
                 "usage_total_tokens": total_tokens}, []
 
-    row = score(run, actually_passed=passed, verification_rule=rule)
+    scorer = assignment_score if assignment_schema else score
+    row = scorer(run, actually_passed=passed, verification_rule=rule)
     row["kind"], row["claimed"], row["rep"] = kind, run.claimed_success, rep
     row["usage_total_tokens"] = total_tokens
     row["provider_requests"] = d.get("provider_requests")
@@ -143,12 +166,19 @@ def row_from_journal(d: dict, rule: str) -> tuple[dict, list[str]]:
     return row, backfilled
 
 
-def rescore_grid(grid: pathlib.Path, rule: str) -> dict:
+def rescore_grid(
+        grid: pathlib.Path,
+        rule: str,
+        *,
+        assignment_schema: bool = False,
+) -> dict:
     """Every journal in one grid, recomputed under one rule."""
     manifest = json.loads((grid / "manifest.json").read_text())
     rows, backfilled = [], {}
     for f in sorted((grid / "runs").glob("*.json")):
-        row, missing = row_from_journal(json.loads(f.read_text()), rule)
+        row, missing = row_from_journal(
+            json.loads(f.read_text()), rule,
+            assignment_schema=assignment_schema)
         rows.append(row)
         for flag in missing:
             backfilled[flag] = backfilled.get(flag, 0) + 1
@@ -157,6 +187,9 @@ def rescore_grid(grid: pathlib.Path, rule: str) -> dict:
     # it describes; that is the whole reason rescore.py could not be reused.
     return {"manifest": {**manifest,
                          "verification_rule": rule,
+                         "scorer_schema": ("assignment_rubric_v2"
+                                           if assignment_schema
+                                           else "historical"),
                          "derived_from": f"{grid.name}/runs",
                          "derivation": "rescore_assignment.py, 0 model calls",
                          "status_flags_backfilled_false": backfilled or None},
@@ -186,14 +219,23 @@ def diff_rows(published: list[dict], derived: list[dict]) -> list[str]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--grid", action="append", type=pathlib.Path,
-                    help="grid directory (repeatable). Default: both assignment grids.")
-    ap.add_argument("--rule", default=DEFAULT_VERIFICATION_RULE,
+                    help="grid directory (repeatable). Default: every discovered grid.")
+    ap.add_argument("--rule", default=None,
                     choices=sorted(VERIFICATION_RULES),
-                    help="which reading drives the verification axis")
+                    help=("which reading drives the verification axis; default: "
+                          f"{DEFAULT_VERIFICATION_RULE}"))
+    ap.add_argument(
+        "--assignment-primary", action="store_true",
+        help=("emit the rubric-aligned assignment schema: verification after "
+              "the final edit plus attempted/blocked/succeeded integrity fields"))
     ap.add_argument("--write", action="store_true",
-                    help="write results_rescored_{rule}.json into each grid")
+                    help="write the selected derived result into each grid")
     ap.add_argument("--list-rules", action="store_true")
     a = ap.parse_args(argv)
+
+    if a.assignment_primary and a.rule is not None:
+        ap.error("--assignment-primary selects its own verification rule; "
+                 "do not combine it with --rule")
 
     if a.list_rules:
         for name, fn in sorted(VERIFICATION_RULES.items()):
@@ -202,18 +244,35 @@ def main(argv=None) -> int:
         return 0
 
     targets = a.grid or list(grids())
-    is_control = a.rule == DEFAULT_VERIFICATION_RULE
     failures = 0
 
     for grid in targets:
         if not (grid / "runs").is_dir():
             print(f"{grid}: no runs/ directory", file=sys.stderr)
             return 2
-        derived = rescore_grid(grid, a.rule)
+        published_rule, published_assignment_schema = frozen_scorer(grid)
+
+        if a.assignment_primary:
+            rule = ASSIGNMENT_VERIFICATION_RULE
+            assignment_schema = True
+        elif a.rule is not None:
+            rule = a.rule
+            assignment_schema = False
+        else:
+            # No-argument rescoring is a control for each grid's own frozen
+            # scorer. Historical grids predate these manifest fields and inherit
+            # v1; new assignment grids freeze v2 plus the rubric schema.
+            rule = published_rule
+            assignment_schema = published_assignment_schema
+        is_control = (rule == published_rule
+                      and assignment_schema == published_assignment_schema)
+
+        derived = rescore_grid(
+            grid, rule, assignment_schema=assignment_schema)
         published = json.loads((grid / "results.json").read_text())["rows"]
         diffs = diff_rows(published, derived["rows"])
 
-        print(f"\n{grid.name}  rule={a.rule}  "
+        print(f"\n{grid.name}  rule={rule}  "
               f"{len(derived['rows'])} rows from journals, 0 model calls")
         back = derived["manifest"]["status_flags_backfilled_false"]
         if back:
@@ -248,14 +307,17 @@ def main(argv=None) -> int:
         else:
             changed = sorted({d.split(":")[0] for d in diffs
                               if "'<absent>' ->" not in d})
-            print(f"  vs published rule {DEFAULT_VERIFICATION_RULE}: "
+            print(f"  vs published rule {published_rule}: "
                   f"{len(changed)} row(s) change")
             for d in diffs:
                 if "'<absent>' ->" not in d:
                     print(f"    {d}")
 
         if a.write:
-            out = grid / f"results_rescored_{a.rule}.json"
+            filename = ("results_assignment_primary.json"
+                        if a.assignment_primary
+                        else f"results_rescored_{rule}.json")
+            out = grid / filename
             out.write_text(json.dumps(derived, indent=1) + "\n")
             print(f"  wrote {out}")
 

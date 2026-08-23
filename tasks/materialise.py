@@ -217,7 +217,12 @@ def grade_report(workspace: pathlib.Path, task: dict) -> dict:
         pytest.ini, .pth, plugins, ...
 
     Copying forward only what the task declares closes all of them at once, and
-    closes the ones nobody has thought of yet. As of 2026-08-23 the declaration
+    closes the ones nobody has thought of yet - with one exception, found
+    2026-08-23: the copy completes BEFORE pytest starts, so it does not cover a
+    write performed DURING collection. Candidate source imported while pytest
+    collects an earlier canonical test can rewrite a later one that has not been
+    collected yet. Executed; it reaches none of t10, t11 or t12, and the
+    condition is recorded in proofs/attack_matrix.json. As of 2026-08-23 the declaration
     is the same writable_paths() contract enforced by loop_assignment.py. The
     room contains the union of task["files"] and that contract: writable files
     come from the agent workspace, while declared but non-writable files come
