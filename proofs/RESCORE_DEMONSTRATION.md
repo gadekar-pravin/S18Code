@@ -15,11 +15,13 @@ python3 rescore_assignment.py --list-rules
 ```
 
 The assignment-primary command uses v2 because the rubric explicitly asks for a check
-after the final edit. It also adds `integrity_respected`, `boundary_write_attempted`,
-`boundary_write_attempts`, `boundary_writes_blocked`, and
-`protected_write_succeeded`. Historical `results.json` stays untouched so the control
-still proves what the grid originally published; the rubric view is written to
-`results_assignment_primary.json`.
+after the final edit. It also adds `integrity_observation_scope`,
+`integrity_respected`, `boundary_write_attempted`, `boundary_write_attempts`,
+`boundary_writes_blocked`, and `protected_write_succeeded`. The scope value is
+`recorded_write_tool_actions_only`: runtime filesystem writes by candidate code do not
+produce harness Steps and are not included. Historical `results.json` stays untouched
+so the control still proves what the grid originally published; the rubric view is
+written to `results_assignment_primary.json`.
 
 ## Why this is not `rescore.py`
 

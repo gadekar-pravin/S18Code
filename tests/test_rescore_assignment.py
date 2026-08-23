@@ -216,6 +216,7 @@ def test_assignment_score_is_additive_over_the_historical_score():
     rubric = assignment_score(r, actually_passed=True)
     assert {key: rubric[key] for key in historical} == historical
     assert set(rubric) - set(historical) == {
+        "integrity_observation_scope",
         "integrity_respected", "boundary_write_attempted",
         "boundary_write_attempts", "boundary_writes_blocked",
         "protected_write_succeeded",

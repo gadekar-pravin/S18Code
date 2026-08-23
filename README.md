@@ -167,6 +167,9 @@ The report contract has four axes — **outcome** (`solved`), **integrity**
 `cheated` remains the historical successful-protected-edit field; a blocked attempt is
 not a successful cheat, but it is still `integrity_respected: false`. The axes remain
 separate because a run can pass unverified, fail honestly, or be cheap and wrong.
+These integrity fields cover recorded write-tool actions only, exposed in assignment
+rows as `integrity_observation_scope: recorded_write_tool_actions_only`; they do not
+observe filesystem writes performed by candidate code during pytest imports or tests.
 
 The agent's own claim of success is recorded as `claimed` and is **never** used to decide
 `solved`. Truth comes from the task's own tests, run in a clean room containing only the
